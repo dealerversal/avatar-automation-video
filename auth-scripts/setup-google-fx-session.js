@@ -9,7 +9,7 @@ const __dirname = path.dirname(__filename);
 const profileDir = path.resolve(__dirname, '../browser-profile');
 
 console.log('\n======================================================');
-console.log('🚀 GOOGLE FX FLOW — LOCAL SESSION SETUP');
+console.log('🚀 GOOGLE FX FLOW — LOCAL SESSION SETUP (STEALTH MODE)');
 console.log('======================================================\n');
 console.log(`📁 Profile directory: ${profileDir}`);
 
@@ -28,18 +28,26 @@ if (fs.existsSync(profileDir)) {
     fs.mkdirSync(profileDir, { recursive: true });
 }
 
-console.log('🌐 Opening browser in interactive mode...\n');
+console.log('🌐 Opening browser in stealth mode to bypass Google bot security checks...\n');
 
 async function runSetup() {
     let context;
     
-    // Attempt 1: Try launching local Google Chrome (most stable on macOS)
+    // Launch Chrome with --enable-automation ignored & stealth overrides
     try {
-        console.log('💡 Launching Google Chrome...');
+        console.log('💡 Launching Google Chrome (Stealth mode)...');
         context = await chromium.launchPersistentContext(profileDir, {
             channel: 'chrome',
             headless: false,
             viewport: { width: 1280, height: 800 },
+            ignoreDefaultArgs: ['--enable-automation'],
+            args: [
+                '--disable-blink-features=AutomationControlled',
+                '--no-first-run',
+                '--no-service-autorun',
+                '--password-store=basic',
+                '--disable-features=IsolateOrigins,site-per-process',
+            ],
         });
     } catch (e1) {
         console.warn('⚠️ Google Chrome channel not available, trying bundled Playwright Chromium...');
@@ -47,12 +55,22 @@ async function runSetup() {
             context = await chromium.launchPersistentContext(profileDir, {
                 headless: false,
                 viewport: { width: 1280, height: 800 },
+                ignoreDefaultArgs: ['--enable-automation'],
+                args: ['--disable-blink-features=AutomationControlled'],
             });
         } catch (e2) {
             console.error('❌ Could not launch browser:', e2.message);
             process.exit(1);
         }
     }
+
+    // Stealth script to hide webdriver & automation flags from Google
+    await context.addInitScript(() => {
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+        window.navigator.chrome = { runtime: {} };
+        Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+        Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+    });
 
     const page = context.pages().length > 0 ? context.pages()[0] : await context.newPage();
     console.log('🔗 Navigating to https://labs.google/fx/tools/flow...');
