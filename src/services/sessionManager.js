@@ -173,6 +173,9 @@ export class SessionManager {
                 logger.warn('[SessionManager] Could not extract detailed user info: ' + e.message);
             }
 
+            const cookies = await context.cookies(['https://labs.google', 'https://google.com']);
+            const hasGoogleCookies = cookies.some((c) => c.name.includes('SID') || c.name.includes('HSID') || c.name.includes('SSID'));
+
             await context.close();
 
             const authenticated = (hasPromptInput || hasGoogleCookies) && !currentUrl.includes('accounts.google.com');
@@ -186,7 +189,7 @@ export class SessionManager {
                 hasGoogleCookies,
                 message: authenticated
                     ? 'Successfully authenticated with Google FX Flow!'
-                    : 'Not authenticated with Google. Please import valid session cookies.',
+                    : 'Not authenticated with Google. Please upload your browser-profile.zip.',
             };
         } catch (error) {
             if (context) await context.close().catch(() => {});
