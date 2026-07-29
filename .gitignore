@@ -4,3 +4,4 @@ logs/
 /tmp/kimi_session.json
 *.log
 browser-profile/
+*.zip
