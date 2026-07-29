@@ -341,13 +341,13 @@ export class SessionManager {
 
             const statusResult = await this.checkStatus();
 
-            // Trigger PM2 & Nginx reload asynchronously after 500ms
+            // Trigger PM2 reload asynchronously after 500ms
             setTimeout(async () => {
                 try {
                     const { exec } = await import('child_process');
-                    logger.info('[SessionManager] Reloading PM2 process & Nginx after browser profile upload...');
-                    exec('pm2 restart gen.socialversal.online && systemctl reload nginx', (err) => {
-                        if (err) logger.warn(`[SessionManager] PM2/Nginx reload note: ${err.message}`);
+                    logger.info('[SessionManager] Reloading PM2 process after browser profile upload...');
+                    exec('/usr/bin/pm2 restart gen.socialversal.online || pm2 restart gen.socialversal.online', (err) => {
+                        if (err) logger.warn(`[SessionManager] PM2 reload note: ${err.message}`);
                     });
                 } catch (e) {}
             }, 500);
