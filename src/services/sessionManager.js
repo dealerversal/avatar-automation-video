@@ -106,21 +106,30 @@ export class SessionManager {
         await closeSharedContext();
 
         let context = null;
+        const checkOptions = {
+            headless: true,
+            args: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-blink-features=AutomationControlled',
+                '--disable-gpu',
+                '--disable-dev-shm-usage',
+            ],
+            viewport: { width: 1280, height: 720 },
+            userAgent:
+                'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36',
+        };
+
         try {
-            context = await chromium.launchPersistentContext(profileDir, {
-                headless: true,
-                ignoreDefaultArgs: ['--enable-automation'],
-                args: [
-                    '--no-sandbox',
-                    '--disable-setuid-sandbox',
-                    '--disable-blink-features=AutomationControlled',
-                    '--disable-gpu',
-                    '--disable-dev-shm-usage',
-                ],
-                viewport: { width: 1280, height: 720 },
-                userAgent:
-                    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36',
-            });
+            try {
+                context = await chromium.launchPersistentContext(profileDir, {
+                    ...checkOptions,
+                    channel: 'chrome',
+                    ignoreDefaultArgs: ['--enable-automation'],
+                });
+            } catch (cErr) {
+                context = await chromium.launchPersistentContext(profileDir, checkOptions);
+            }
 
             await context.addInitScript(() => {
                 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });

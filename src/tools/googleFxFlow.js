@@ -98,12 +98,11 @@ export class GoogleFxFlowTool extends BaseTool {
             } catch {}
 
             console.log(`\n[GoogleFX] 🚀 Launching persistent browser context from: ${profileDir}`);
-            sharedContext = await chromium.launchPersistentContext(profileDir, {
+            
+            const launchOptions = {
                 headless: config.browser.headless,
                 slowMo: config.browser.slowMo,
-                ignoreDefaultArgs: ['--enable-automation'],
                 args: [
-                    '--start-maximized',
                     '--no-sandbox',
                     '--disable-setuid-sandbox',
                     '--disable-blink-features=AutomationControlled',
@@ -111,14 +110,21 @@ export class GoogleFxFlowTool extends BaseTool {
                     '--disable-dev-shm-usage',
                     '--no-first-run',
                     '--no-default-browser-check',
-                    '--disable-popup-blocking',
-                    '--disable-infobars',
-                    '--suppress-message-center-popups',
                 ],
                 viewport: { width: 1280, height: 800 },
                 userAgent:
                     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36',
-            });
+            };
+
+            try {
+                sharedContext = await chromium.launchPersistentContext(profileDir, {
+                    ...launchOptions,
+                    channel: 'chrome',
+                    ignoreDefaultArgs: ['--enable-automation'],
+                });
+            } catch (e1) {
+                sharedContext = await chromium.launchPersistentContext(profileDir, launchOptions);
+            }
 
             await sharedContext.addInitScript(() => {
                 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
