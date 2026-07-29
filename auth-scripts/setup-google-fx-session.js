@@ -13,7 +13,7 @@ console.log('🚀 GOOGLE FX FLOW — LOCAL SESSION SETUP');
 console.log('======================================================\n');
 console.log(`📁 Profile directory: ${profileDir}`);
 
-// Clean lock files if present
+// Clean stale lock files if present
 if (fs.existsSync(profileDir)) {
     const lockFiles = ['SingletonLock', 'SingletonCookie', 'SingletonSocket', 'lockfile', 'DevToolsActivePort'];
     for (const f of lockFiles) {
@@ -43,7 +43,6 @@ async function runSetup() {
         });
     } catch (e1) {
         console.warn('⚠️ Google Chrome channel not available, trying bundled Playwright Chromium...');
-        // Attempt 2: Bundled Playwright Chromium without extra args
         try {
             context = await chromium.launchPersistentContext(profileDir, {
                 headless: false,
@@ -59,12 +58,14 @@ async function runSetup() {
     console.log('🔗 Navigating to https://labs.google/fx/tools/flow...');
     await page.goto('https://labs.google/fx/tools/flow', { waitUntil: 'domcontentloaded' }).catch(() => {});
 
-    console.log('\n------------------------------------------------------');
-    console.log('🔑 PLEASE LOG IN TO YOUR GOOGLE ACCOUNT IN THE BROWSER.');
-    console.log('------------------------------------------------------');
-    console.log('👉 Once logged in and on the Google FX Flow tool page,');
+    console.log('\n------------------------------------------------------------------');
+    console.log('🔑 STEP 1: LOG IN TO YOUR GOOGLE ACCOUNT IN THE OPENED BROWSER.');
+    console.log('➕ STEP 2: CLICK "CREATE" OR "+ NEW PROJECT" IN THE BROWSER.');
+    console.log('   (This approves Google OAuth consent & unlocks project creation!)');
+    console.log('------------------------------------------------------------------');
+    console.log('👉 Once a project opens and you see the prompt input bar,');
     console.log('👉 return to this terminal and press [ENTER] to save.');
-    console.log('------------------------------------------------------\n');
+    console.log('------------------------------------------------------------------\n');
 
     const rl = readline.createInterface({
         input: process.stdin,
@@ -72,7 +73,7 @@ async function runSetup() {
     });
 
     await new Promise((resolve) => {
-        rl.question('Press [ENTER] after completing Google login in browser...', () => {
+        rl.question('Press [ENTER] after completing Google login & project creation...', () => {
             rl.close();
             resolve();
         });
@@ -81,14 +82,12 @@ async function runSetup() {
     console.log('\n💾 Saving session profile...');
     await context.close();
 
-    // Clean heavy non-essential caches to shrink zip file size (60MB -> 2MB)
+    // Clean ONLY heavy temporary media/script caches (preserve ServiceWorker & LocalStorage & IndexedDB)
     try {
         const cacheDirs = [
             'Default/Cache',
             'Default/Code Cache',
             'Default/GPUCache',
-            'Default/Service Worker/CacheStorage',
-            'Default/Service Worker/ScriptCache',
             'Default/DawnCache',
             'GraphiteDawnCache',
             'Crashpad',
@@ -99,7 +98,7 @@ async function runSetup() {
                 fs.rmSync(fullPath, { recursive: true, force: true });
             }
         }
-        console.log('🧹 Purged temporary browser caches (Profile optimized & lightweight).');
+        console.log('🧹 Optimized browser profile (purged media caches while preserving auth tokens).');
     } catch (e) {}
 
     console.log('\n======================================================');
