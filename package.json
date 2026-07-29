@@ -7,10 +7,10 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
-    "setup": "node scripts/setup-google-fx-session.js",
-    "setup-fx": "node scripts/setup-google-fx-session.js",
-    "test": "node scripts/test-google-fx.js",
-    "test-fx": "node scripts/test-google-fx.js"
+    "setup": "node auth-scripts/setup-google-fx-session.js",
+    "setup-fx": "node auth-scripts/setup-google-fx-session.js",
+    "test": "node auth-scripts/test-google-fx.js",
+    "test-fx": "node auth-scripts/test-google-fx.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1097.0",
