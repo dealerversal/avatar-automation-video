@@ -13,15 +13,6 @@
                     fontFamily: {
                         sans: ['Outfit', 'Inter', 'sans-serif'],
                         mono: ['JetBrains Mono', 'monospace'],
-                    },
-                    colors: {
-                        brand: {
-                            50: '#eff6ff',
-                            100: '#dbeafe',
-                            500: '#3b82f6',
-                            600: '#2563eb',
-                            700: '#1d4ed8',
-                        }
                     }
                 }
             }
@@ -33,82 +24,130 @@
 </head>
 <body class="bg-slate-50 text-slate-800 font-sans min-h-screen flex items-center justify-center p-4 sm:p-6 lg:p-8 selection:bg-blue-100 selection:text-blue-700">
 
-    <div class="w-full max-w-3xl bg-white border border-slate-200/80 rounded-3xl shadow-xl shadow-slate-200/60 p-6 sm:p-10 transition-all duration-300">
+    <div class="w-full max-w-2xl bg-white border border-slate-200 rounded-2xl p-6 sm:p-8">
         
         <!-- Header -->
-        <div class="flex flex-col sm:flex-row sm:items-center justify-between pb-6 border-b border-slate-100 gap-4">
-            <div class="flex items-center gap-3.5">
-                <div class="w-12 h-12 rounded-2xl bg-gradient-to-tr from-blue-600 to-indigo-600 flex items-center justify-center shadow-lg shadow-blue-500/20 text-white font-bold text-xl">
+        <div class="flex items-center justify-between pb-6 border-b border-slate-100 gap-4">
+            <div class="flex items-center gap-3">
+                <div class="w-10 h-10 rounded-xl bg-blue-600 flex items-center justify-center text-white font-bold text-lg">
                     ⚡
                 </div>
                 <div>
-                    <h1 class="text-2xl font-bold text-slate-900 tracking-tight">Google FX Session Manager</h1>
-                    <p class="text-sm text-slate-500 font-medium">VPS Browser Profile & Authentication Sync</p>
+                    <h1 class="text-xl font-bold text-slate-900 tracking-tight">Google FX Session Manager</h1>
+                    <p class="text-xs text-slate-500 font-medium">VPS Browser Profile & Authentication Sync</p>
                 </div>
             </div>
 
-            <!-- Status Badge -->
-            <div id="statusBadge" class="self-start sm:self-center inline-flex items-center gap-2 px-4 py-2 rounded-full text-xs font-semibold bg-slate-100 border border-slate-200 text-slate-600 transition-all">
-                <span id="statusDot" class="w-2.5 h-2.5 rounded-full bg-amber-500 animate-pulse"></span>
-                <span id="statusText">Checking Status...</span>
+            <!-- Dynamic Status Badge -->
+            <div id="statusBadge" class="hidden inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-semibold border transition-all">
+                <span id="statusDot" class="w-2 h-2 rounded-full"></span>
+                <span id="statusText">...</span>
             </div>
         </div>
 
-        <!-- Main Card Section -->
-        <div class="mt-6">
-            <label class="block text-sm font-semibold text-slate-700 mb-3 flex items-center gap-2">
-                <span>🔑 Import Google Session Data</span>
-            </label>
+        <!-- 1. Skeleton Loader (Shown during initial status check) -->
+        <div id="skeletonLoader" class="mt-6 space-y-4 animate-pulse">
+            <div class="h-4 bg-slate-200 rounded w-1/3"></div>
+            <div class="h-24 bg-slate-100 border border-slate-200/60 rounded-xl p-4 space-y-3">
+                <div class="h-4 bg-slate-200 rounded w-2/3"></div>
+                <div class="h-3 bg-slate-200 rounded w-1/2"></div>
+            </div>
+            <div class="h-10 bg-slate-200 rounded-xl w-full"></div>
+        </div>
+
+        <!-- 2. Connected State (Shown ONLY when connected & authenticated) -->
+        <div id="connectedState" class="hidden mt-6">
+            <div class="bg-emerald-50 border border-emerald-200 rounded-xl p-5 mb-6 text-center sm:text-left">
+                <div class="flex flex-col sm:flex-row items-center justify-between gap-4">
+                    <div class="flex items-center gap-3.5">
+                        <div class="w-10 h-10 rounded-full bg-emerald-500 text-white flex items-center justify-center text-lg font-bold">
+                            ✓
+                        </div>
+                        <div>
+                            <h3 class="text-base font-bold text-emerald-900">Session Connected & Authenticated!</h3>
+                            <p class="text-xs text-emerald-700 font-medium mt-0.5" id="connectedDetails">
+                                Google FX Flow is ready for automated generation.
+                            </p>
+                        </div>
+                    </div>
+                    <a href="https://labs.google/fx/tools/flow" target="_blank" class="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-lg transition-colors border border-emerald-600 inline-block">
+                        Open Google FX Flow ↗
+                    </a>
+                </div>
+            </div>
+
+            <!-- Action Buttons for Connected State -->
+            <div class="flex flex-col sm:flex-row gap-3">
+                <button onclick="toggleForm()" id="reauthBtn" class="flex-1 py-2.5 px-4 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold text-xs rounded-xl border border-slate-200 transition-colors">
+                    ✏️ Update / Re-authenticate Session
+                </button>
+                <button onclick="checkStatus()" class="py-2.5 px-4 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold text-xs rounded-xl border border-slate-200 transition-colors">
+                    🔄 Re-verify Auth
+                </button>
+                <button onclick="clearProfile()" class="py-2.5 px-4 bg-rose-50 hover:bg-rose-100 text-rose-600 font-semibold text-xs rounded-xl border border-rose-200 transition-colors">
+                    🗑️ Reset Profile
+                </button>
+            </div>
+        </div>
+
+        <!-- 3. Form Section (Hidden when connected unless user clicks Update) -->
+        <div id="formSection" class="hidden mt-6">
+            <div class="flex items-center justify-between mb-3">
+                <label class="text-sm font-semibold text-slate-700 flex items-center gap-2">
+                    <span>🔑 Import Google Session Data</span>
+                </label>
+                <button id="cancelFormBtn" onclick="hideFormIfConnected()" class="hidden text-xs text-slate-500 hover:text-slate-700 underline font-medium">
+                    Cancel
+                </button>
+            </div>
 
             <!-- Tabs -->
-            <div class="flex bg-slate-100/80 p-1.5 rounded-xl border border-slate-200/60 mb-4 gap-1">
-                <button id="tabCookies" onclick="setTab('cookies')" class="flex-1 py-2 px-4 text-xs sm:text-sm font-medium rounded-lg text-blue-700 bg-white shadow-sm transition-all">
+            <div class="flex bg-slate-100 p-1 rounded-xl border border-slate-200 mb-4 gap-1">
+                <button id="tabCookies" onclick="setTab('cookies')" class="flex-1 py-1.5 px-3 text-xs font-medium rounded-lg text-blue-700 bg-white border border-slate-200 transition-all">
                     Cookie Header String
                 </button>
-                <button id="tabJson" onclick="setTab('json')" class="flex-1 py-2 px-4 text-xs sm:text-sm font-medium rounded-lg text-slate-600 hover:text-slate-900 transition-all">
+                <button id="tabJson" onclick="setTab('json')" class="flex-1 py-1.5 px-3 text-xs font-medium rounded-lg text-slate-600 hover:text-slate-900 transition-all">
                     Playwright storageState JSON
                 </button>
             </div>
 
             <!-- Input Box -->
-            <div class="relative">
-                <textarea id="sessionInput" rows="6" 
-                    class="w-full bg-slate-50 border border-slate-200 rounded-2xl p-4 text-xs sm:text-sm font-mono text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white focus:border-transparent transition-all shadow-inner"
-                    placeholder="Paste your Google Cookies here...&#10;Example: __Secure-1PSID=...; __Secure-3PSID=...; SID=..."></textarea>
-            </div>
+            <textarea id="sessionInput" rows="5" 
+                class="w-full bg-slate-50 border border-slate-200 rounded-xl p-3.5 text-xs font-mono text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white focus:border-transparent transition-all"
+                placeholder="Paste your Google Cookies here...&#10;Example: __Secure-1PSID=...; __Secure-3PSID=...; SID=..."></textarea>
 
             <!-- Buttons -->
-            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-5">
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-2.5 mt-4">
                 <button onclick="saveSession()" id="saveBtn" 
-                    class="sm:col-span-1 py-3 px-5 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white font-semibold text-sm rounded-xl shadow-md shadow-blue-500/20 hover:shadow-lg hover:shadow-blue-500/30 transition-all active:scale-[0.98] flex items-center justify-center gap-2">
-                    <span>✨ Save & Connect</span>
+                    class="sm:col-span-1 py-2.5 px-4 bg-blue-600 hover:bg-blue-700 text-white font-semibold text-xs rounded-xl border border-blue-600 transition-colors flex items-center justify-center gap-1.5">
+                    <span>✨ Save & Connect Session</span>
                 </button>
                 <button onclick="checkStatus()" id="checkBtn" 
-                    class="py-3 px-5 bg-slate-100 hover:bg-slate-200/80 text-slate-700 font-semibold text-sm rounded-xl border border-slate-200 transition-all active:scale-[0.98] flex items-center justify-center gap-2">
+                    class="py-2.5 px-4 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold text-xs rounded-xl border border-slate-200 transition-colors flex items-center justify-center gap-1.5">
                     <span>🔄 Verify Status</span>
                 </button>
                 <button onclick="clearProfile()" id="clearBtn" 
-                    class="py-3 px-5 bg-rose-50 hover:bg-rose-100 text-rose-600 font-semibold text-sm rounded-xl border border-rose-200/80 transition-all active:scale-[0.98] flex items-center justify-center gap-2">
+                    class="py-2.5 px-4 bg-rose-50 hover:bg-rose-100 text-rose-600 font-semibold text-xs rounded-xl border border-rose-200 transition-colors flex items-center justify-center gap-1.5">
                     <span>🗑️ Reset Profile</span>
                 </button>
             </div>
-
-            <!-- Console Log Output -->
-            <div id="logBox" class="hidden mt-5 p-4 bg-slate-900 text-emerald-400 font-mono text-xs rounded-2xl max-h-40 overflow-y-auto border border-slate-800 space-y-1 shadow-inner"></div>
         </div>
 
+        <!-- Log Console -->
+        <div id="logBox" class="hidden mt-5 p-3.5 bg-slate-900 text-emerald-400 font-mono text-xs rounded-xl max-h-36 overflow-y-auto border border-slate-800 space-y-1"></div>
+
         <!-- Quick Guide -->
-        <div class="mt-8 pt-6 border-t border-slate-100">
-            <div class="bg-blue-50/60 border border-blue-100 rounded-2xl p-5">
-                <h3 class="text-sm font-bold text-blue-900 flex items-center gap-2 mb-2">
+        <div class="mt-6 pt-5 border-t border-slate-100">
+            <div class="bg-blue-50/50 border border-blue-100 rounded-xl p-4">
+                <h3 class="text-xs font-bold text-blue-900 flex items-center gap-1.5 mb-1.5">
                     <span>💡 How to copy Google Cookies in 10 seconds:</span>
                 </h3>
-                <ol class="list-decimal list-inside text-xs sm:text-sm text-blue-950/80 space-y-1.5 leading-relaxed font-normal">
-                    <li>Open <a href="https://labs.google/fx/tools/flow" target="_blank" class="underline font-semibold text-blue-600 hover:text-blue-800">labs.google/fx/tools/flow</a> in your desktop browser while logged in.</li>
-                    <li>Open Chrome DevTools (Press <kbd class="px-1.5 py-0.5 bg-white border border-blue-200 rounded text-xs font-mono font-semibold shadow-xs">F12</kbd> or <kbd class="px-1.5 py-0.5 bg-white border border-blue-200 rounded text-xs font-mono font-semibold shadow-xs">Cmd + Option + I</kbd>).</li>
-                    <li>Go to <strong>Network</strong> tab → Refresh page → Click any request to <code class="bg-white px-1.5 py-0.5 rounded text-blue-700 font-mono text-xs border border-blue-200">labs.google</code>.</li>
-                    <li>Right-click → <strong>Copy</strong> → <strong>Copy request headers</strong> (or copy the <code class="bg-white px-1.5 py-0.5 rounded text-blue-700 font-mono text-xs border border-blue-200">Cookie:</code> value).</li>
-                    <li>Paste in the box above and click <strong>Save & Connect</strong>.</li>
+                <ol class="list-decimal list-inside text-xs text-blue-950/80 space-y-1 leading-relaxed">
+                    <li>Open <a href="https://labs.google/fx/tools/flow" target="_blank" class="underline font-semibold text-blue-600 hover:text-blue-800">labs.google/fx/tools/flow</a> while logged in with your Google account.</li>
+                    <li>Press <kbd class="px-1 py-0.5 bg-white border border-blue-200 rounded text-xs font-mono font-semibold">F12</kbd> or <kbd class="px-1 py-0.5 bg-white border border-blue-200 rounded text-xs font-mono font-semibold">Cmd + Option + I</kbd> → <strong>Network</strong> tab.</li>
+                    <li>Refresh page → Click any request to <code class="bg-white px-1 py-0.5 rounded text-blue-700 font-mono border border-blue-200">labs.google</code>.</li>
+                    <li>Right-click → <strong>Copy</strong> → <strong>Copy request headers</strong> (or copy the <code class="bg-white px-1 py-0.5 rounded text-blue-700 font-mono border border-blue-200">Cookie:</code> header value).</li>
+                    <li>Paste in the box above and click <strong>Save & Connect Session</strong>.</li>
                 </ol>
             </div>
         </div>
@@ -116,6 +155,7 @@
     </div>
 
     <script>
+        let isAuthenticated = false;
         let currentTab = 'cookies';
 
         function setTab(tab) {
@@ -125,12 +165,12 @@
             const input = document.getElementById('sessionInput');
 
             if (tab === 'cookies') {
-                tabCookies.className = 'flex-1 py-2 px-4 text-xs sm:text-sm font-medium rounded-lg text-blue-700 bg-white shadow-sm transition-all';
-                tabJson.className = 'flex-1 py-2 px-4 text-xs sm:text-sm font-medium rounded-lg text-slate-600 hover:text-slate-900 transition-all';
+                tabCookies.className = 'flex-1 py-1.5 px-3 text-xs font-medium rounded-lg text-blue-700 bg-white border border-slate-200 transition-all';
+                tabJson.className = 'flex-1 py-1.5 px-3 text-xs font-medium rounded-lg text-slate-600 hover:text-slate-900 transition-all';
                 input.placeholder = 'Paste your Cookie Header string here...\nExample: __Secure-1PSID=...; __Secure-3PSID=...; SID=...';
             } else {
-                tabJson.className = 'flex-1 py-2 px-4 text-xs sm:text-sm font-medium rounded-lg text-blue-700 bg-white shadow-sm transition-all';
-                tabCookies.className = 'flex-1 py-2 px-4 text-xs sm:text-sm font-medium rounded-lg text-slate-600 hover:text-slate-900 transition-all';
+                tabJson.className = 'flex-1 py-1.5 px-3 text-xs font-medium rounded-lg text-blue-700 bg-white border border-slate-200 transition-all';
+                tabCookies.className = 'flex-1 py-1.5 px-3 text-xs font-medium rounded-lg text-slate-600 hover:text-slate-900 transition-all';
                 input.placeholder = 'Paste Playwright storageState JSON object here...\nExample: { "cookies": [...], "origins": [...] }';
             }
         }
@@ -143,34 +183,75 @@
             box.scrollTop = box.scrollHeight;
         }
 
+        function toggleForm() {
+            const form = document.getElementById('formSection');
+            const cancelBtn = document.getElementById('cancelFormBtn');
+            if (form.classList.contains('hidden')) {
+                form.classList.remove('hidden');
+                cancelBtn.classList.remove('hidden');
+            } else {
+                hideFormIfConnected();
+            }
+        }
+
+        function hideFormIfConnected() {
+            if (isAuthenticated) {
+                document.getElementById('formSection').classList.add('hidden');
+                document.getElementById('cancelFormBtn').classList.add('hidden');
+            }
+        }
+
         async function checkStatus() {
+            const loader = document.getElementById('skeletonLoader');
+            const connectedState = document.getElementById('connectedState');
+            const formSection = document.getElementById('formSection');
             const badge = document.getElementById('statusBadge');
             const dot = document.getElementById('statusDot');
             const text = document.getElementById('statusText');
 
-            dot.className = 'w-2.5 h-2.5 rounded-full bg-amber-500 animate-pulse';
-            badge.className = 'self-start sm:self-center inline-flex items-center gap-2 px-4 py-2 rounded-full text-xs font-semibold bg-amber-50 border border-amber-200 text-amber-800 transition-all';
-            text.innerText = 'Verifying VPS Profile...';
+            loader.classList.remove('hidden');
+            connectedState.classList.add('hidden');
+            formSection.classList.add('hidden');
+            badge.classList.add('hidden');
 
             try {
                 const res = await fetch('/api/session/status');
                 const data = await res.json();
 
+                loader.classList.add('hidden');
+                badge.classList.remove('hidden');
+
                 if (data.authenticated) {
-                    dot.className = 'w-2.5 h-2.5 rounded-full bg-emerald-500 shadow-sm shadow-emerald-500/50';
-                    badge.className = 'self-start sm:self-center inline-flex items-center gap-2 px-4 py-2 rounded-full text-xs font-semibold bg-emerald-50 border border-emerald-200 text-emerald-800 transition-all';
+                    isAuthenticated = true;
+                    dot.className = 'w-2 h-2 rounded-full bg-emerald-500';
+                    badge.className = 'inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-semibold bg-emerald-50 border border-emerald-200 text-emerald-800';
                     text.innerText = 'Connected & Authenticated';
+
+                    document.getElementById('connectedDetails').innerText = `Google FX Flow active (${data.cookieCount} cookies stored).`;
+                    connectedState.classList.remove('hidden');
+                    formSection.classList.add('hidden');
                     showLog(`✅ Session Active: Authenticated with Google FX Flow! (${data.cookieCount} cookies stored)`, 'success');
                 } else {
-                    dot.className = 'w-2.5 h-2.5 rounded-full bg-rose-500 shadow-sm shadow-rose-500/50';
-                    badge.className = 'self-start sm:self-center inline-flex items-center gap-2 px-4 py-2 rounded-full text-xs font-semibold bg-rose-50 border border-rose-200 text-rose-800 transition-all';
+                    isAuthenticated = false;
+                    dot.className = 'w-2 h-2 rounded-full bg-rose-500';
+                    badge.className = 'inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-semibold bg-rose-50 border border-rose-200 text-rose-800';
                     text.innerText = 'Not Authenticated';
+
+                    connectedState.classList.add('hidden');
+                    formSection.classList.remove('hidden');
                     showLog(`⚠️ Session Inactive: ${data.message}`, 'error');
                 }
             } catch (err) {
-                dot.className = 'w-2.5 h-2.5 rounded-full bg-rose-500';
-                badge.className = 'self-start sm:self-center inline-flex items-center gap-2 px-4 py-2 rounded-full text-xs font-semibold bg-rose-50 border border-rose-200 text-rose-800 transition-all';
+                loader.classList.add('hidden');
+                badge.classList.remove('hidden');
+                isAuthenticated = false;
+
+                dot.className = 'w-2 h-2 rounded-full bg-rose-500';
+                badge.className = 'inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-semibold bg-rose-50 border border-rose-200 text-rose-800';
                 text.innerText = 'Connection Error';
+
+                connectedState.classList.add('hidden');
+                formSection.classList.remove('hidden');
                 showLog(`❌ Network error: ${err.message}`, 'error');
             }
         }
@@ -184,7 +265,7 @@
 
             const btn = document.getElementById('saveBtn');
             btn.disabled = true;
-            btn.classList.add('opacity-75', 'cursor-not-allowed');
+            btn.classList.add('opacity-70', 'cursor-not-allowed');
             btn.innerHTML = '<span>⏳ Importing & Testing...</span>';
             showLog('🚀 Sending session data to VPS session manager...');
 
@@ -213,8 +294,8 @@
                 showLog(`❌ Error: ${err.message}`, 'error');
             } finally {
                 btn.disabled = false;
-                btn.classList.remove('opacity-75', 'cursor-not-allowed');
-                btn.innerHTML = '<span>✨ Save & Connect</span>';
+                btn.classList.remove('opacity-70', 'cursor-not-allowed');
+                btn.innerHTML = '<span>✨ Save & Connect Session</span>';
             }
         }
 
