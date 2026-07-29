@@ -21,7 +21,6 @@ if (fs.existsSync(profileDir)) {
         if (fs.existsSync(lockPath)) {
             try {
                 fs.rmSync(lockPath, { force: true });
-                console.log(`🧹 Cleaned lock file: ${f}`);
             } catch (e) {}
         }
     }
@@ -33,30 +32,25 @@ console.log('🌐 Opening browser in interactive mode...\n');
 
 async function runSetup() {
     let context;
+    
+    // Attempt 1: Try launching local Google Chrome (most stable on macOS)
     try {
+        console.log('💡 Launching Google Chrome...');
         context = await chromium.launchPersistentContext(profileDir, {
+            channel: 'chrome',
             headless: false,
             viewport: { width: 1280, height: 800 },
-            args: [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-blink-features=AutomationControlled',
-                '--disable-dev-shm-usage',
-            ],
         });
-    } catch (err) {
-        console.warn('⚠️ Standard Chromium launch failed, attempting fallback launch without persistent locks...');
-        // Fallback: If persistent context failed due to lock issues, clean directory and retry
+    } catch (e1) {
+        console.warn('⚠️ Google Chrome channel not available, trying bundled Playwright Chromium...');
+        // Attempt 2: Bundled Playwright Chromium without extra args
         try {
-            fs.rmSync(profileDir, { recursive: true, force: true });
-            fs.mkdirSync(profileDir, { recursive: true });
             context = await chromium.launchPersistentContext(profileDir, {
                 headless: false,
                 viewport: { width: 1280, height: 800 },
-                args: ['--no-sandbox', '--disable-setuid-sandbox'],
             });
-        } catch (fallbackErr) {
-            console.error('❌ Could not launch browser:', fallbackErr.message);
+        } catch (e2) {
+            console.error('❌ Could not launch browser:', e2.message);
             process.exit(1);
         }
     }
