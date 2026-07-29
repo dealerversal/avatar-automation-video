@@ -101,6 +101,7 @@ export class GoogleFxFlowTool extends BaseTool {
             sharedContext = await chromium.launchPersistentContext(profileDir, {
                 headless: config.browser.headless,
                 slowMo: config.browser.slowMo,
+                ignoreDefaultArgs: ['--enable-automation'],
                 args: [
                     '--start-maximized',
                     '--no-sandbox',
@@ -114,14 +115,17 @@ export class GoogleFxFlowTool extends BaseTool {
                     '--disable-infobars',
                     '--suppress-message-center-popups',
                 ],
-                viewport: null,
+                viewport: { width: 1280, height: 800 },
                 userAgent:
-                    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 ' +
-                    '(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+                    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36',
             });
 
             await sharedContext.addInitScript(() => {
                 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                window.navigator.chrome = { runtime: {} };
+                Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+                Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+            });
 
                 let currentHighlight = null;
                 let highlightTimer = null;
@@ -230,11 +234,26 @@ export class GoogleFxFlowTool extends BaseTool {
             // 2. Always click "New Project" button first
             console.log(`\n[3/6] ➕ Creating a new project...`);
             await this._createNewProject(page);
-            await this._dismissOverlays(page);
-            const projectUrl = page.url();
+            let projectUrl = page.url();
             console.log(`      ✅ New project opened: ${projectUrl}`);
 
-            // Session check after project creation too
+            // Auto-handle OAuth consent screen if redirected to accounts.google.com
+            if (projectUrl.includes('accounts.google.com') || projectUrl.includes('signin') || projectUrl.includes('oauth')) {
+                console.log(`      ⚠️ Redirected to OAuth authorization screen, attempting auto-continue...`);
+                try {
+                    const consentBtn = await page.$('button:has-text("Continue"), button:has-text("Confirm"), button:has-text("Allow"), [data-email]');
+                    if (consentBtn && (await consentBtn.isVisible())) {
+                        await consentBtn.click();
+                        console.log(`      👉 Auto-clicked OAuth consent/account button.`);
+                        await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => {});
+                        await page.waitForTimeout(3000);
+                        projectUrl = page.url();
+                        console.log(`      ✅ Redirected after consent: ${projectUrl}`);
+                    }
+                } catch (e) {}
+            }
+
+            // Session check after project creation
             if (projectUrl.includes('accounts.google.com') || projectUrl.includes('signin')) {
                 throw new Error('Google session expired after project creation. Please re-login in the browser profile.');
             }
