@@ -1,8 +1,7 @@
 import express from 'express';
 import { SessionManager } from '../services/sessionManager.js';
-import { createLogger } from '../utils/logger.js';
+import { logger } from '../utils/logger.js';
 
-const logger = createLogger('SessionRoute');
 const router = express.Router();
 
 // GET /api/session/status
