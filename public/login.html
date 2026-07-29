@@ -60,15 +60,18 @@
         <!-- 2. Connected State (Shown ONLY when connected & authenticated) -->
         <div id="connectedState" class="hidden mt-6">
             <div class="bg-slate-50 border border-slate-200 rounded-xl p-5 mb-6">
-                <div class="flex items-center gap-3.5">
-                    <div class="w-9 h-9 rounded-full bg-emerald-100 border border-emerald-200 text-emerald-700 flex items-center justify-center shrink-0">
-                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"></path>
-                        </svg>
+                <div class="flex items-center gap-4">
+                    <div id="userAvatarContainer" class="w-12 h-12 rounded-full bg-emerald-100 border border-emerald-200 text-emerald-800 flex items-center justify-center shrink-0 overflow-hidden font-bold text-base">
+                        <span id="userInitial">✓</span>
+                        <img id="userAvatarImg" class="hidden w-full h-full object-cover" src="" alt="Avatar">
                     </div>
                     <div>
-                        <h3 class="text-sm font-bold text-slate-900">Session Connected & Authenticated</h3>
-                        <p class="text-xs text-slate-500 font-medium mt-0.5" id="connectedDetails">
+                        <div class="flex items-center gap-2">
+                            <h3 class="text-base font-bold text-slate-900" id="userName">Session Connected & Authenticated</h3>
+                            <span class="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">Active</span>
+                        </div>
+                        <p class="text-xs text-slate-600 font-medium mt-0.5" id="userEmail"></p>
+                        <p class="text-xs text-slate-400 font-normal mt-0.5" id="connectedDetails">
                             Google FX Flow is ready for automated generation.
                         </p>
                     </div>
@@ -255,7 +258,27 @@
                     badge.className = 'inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-semibold bg-emerald-50 border border-emerald-200 text-emerald-800';
                     text.innerText = 'Connected & Authenticated';
 
-                    document.getElementById('connectedDetails').innerText = `Google FX Flow active (${data.cookieCount} cookies stored).`;
+                    if (data.user) {
+                        document.getElementById('userName').innerText = data.user.name || 'Google Account Connected';
+                        document.getElementById('userEmail').innerText = data.user.email ? data.user.email : '';
+                        if (data.user.avatar) {
+                            document.getElementById('userAvatarImg').src = data.user.avatar;
+                            document.getElementById('userAvatarImg').classList.remove('hidden');
+                            document.getElementById('userInitial').classList.add('hidden');
+                        } else {
+                            document.getElementById('userInitial').innerText = (data.user.name || 'G').charAt(0).toUpperCase();
+                            document.getElementById('userAvatarImg').classList.add('hidden');
+                            document.getElementById('userInitial').classList.remove('hidden');
+                        }
+                    } else {
+                        document.getElementById('userName').innerText = 'Google Account Connected';
+                        document.getElementById('userEmail').innerText = '';
+                        document.getElementById('userInitial').innerText = '✓';
+                        document.getElementById('userAvatarImg').classList.add('hidden');
+                        document.getElementById('userInitial').classList.remove('hidden');
+                    }
+
+                    document.getElementById('connectedDetails').innerText = `Google FX Flow session active (${data.cookieCount} cookies stored).`;
                     connectedState.classList.remove('hidden');
                     formSection.classList.add('hidden');
                     quickGuide.classList.add('hidden');

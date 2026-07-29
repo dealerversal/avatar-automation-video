@@ -134,10 +134,44 @@ export class SessionManager {
                 .then((cnt) => cnt > 0)
                 .catch(() => false);
 
-            const cookies = await context.cookies(['https://labs.google', 'https://google.com']);
-            const hasGoogleCookies = cookies.some(
-                (c) => c.name === 'SID' || c.name === '__Secure-1PSID' || c.name === '__Secure-3PSID'
-            );
+            // Attempt to extract user info from Google Account avatar / DOM
+            let user = null;
+            try {
+                const accountElem = await page
+                    .locator('a[aria-label*="Google Account"], button[aria-label*="Google Account"], img[src*="googleusercontent.com"], [aria-label*="@gmail.com"]')
+                    .first();
+                if (await accountElem.count() > 0) {
+                    const ariaLabel = (await accountElem.getAttribute('aria-label')) || '';
+                    const avatarSrc = await page
+                        .locator('img[src*="googleusercontent.com"]')
+                        .first()
+                        .getAttribute('src')
+                        .catch(() => null);
+
+                    let email = null;
+                    let name = null;
+
+                    const emailMatch = ariaLabel.match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
+                    if (emailMatch) {
+                        email = emailMatch[1];
+                    }
+
+                    const nameMatch = ariaLabel.match(/Google Account:\s*([^(]+)/i);
+                    if (nameMatch) {
+                        name = nameMatch[1].trim();
+                    }
+
+                    if (email || name || avatarSrc) {
+                        user = {
+                            name: name || (email ? email.split('@')[0] : 'Google User'),
+                            email: email || null,
+                            avatar: avatarSrc || null,
+                        };
+                    }
+                }
+            } catch (e) {
+                logger.warn('[SessionManager] Could not extract detailed user info: ' + e.message);
+            }
 
             await context.close();
 
@@ -147,6 +181,7 @@ export class SessionManager {
                 authenticated,
                 url: currentUrl,
                 title: pageTitle,
+                user,
                 cookieCount: cookies.length,
                 hasGoogleCookies,
                 message: authenticated
