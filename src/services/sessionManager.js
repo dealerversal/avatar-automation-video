@@ -102,6 +102,13 @@ export class SessionManager {
             };
         }
 
+        if (sharedContext) {
+            try {
+                await sharedContext.close();
+            } catch (e) {}
+            sharedContext = null;
+        }
+
         let context = null;
         try {
             context = await chromium.launchPersistentContext(profileDir, {
@@ -306,6 +313,13 @@ export class SessionManager {
 
         try {
             writeFileSync(tempZipPath, zipBuffer);
+
+            if (sharedContext) {
+                try {
+                    await sharedContext.close();
+                } catch (e) {}
+                sharedContext = null;
+            }
 
             if (existsSync(profileDir)) {
                 rmSync(profileDir, { recursive: true, force: true });
