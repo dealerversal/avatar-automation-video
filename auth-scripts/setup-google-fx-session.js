@@ -1,5 +1,6 @@
 import { chromium } from 'playwright';
 import path from 'path';
+import fs from 'fs';
 import readline from 'readline';
 import { fileURLToPath } from 'url';
 
@@ -11,22 +12,58 @@ console.log('\n======================================================');
 console.log('🚀 GOOGLE FX FLOW — LOCAL SESSION SETUP');
 console.log('======================================================\n');
 console.log(`📁 Profile directory: ${profileDir}`);
-console.log('🌐 Opening Chromium in interactive mode...\n');
+
+// Clean lock files if present
+if (fs.existsSync(profileDir)) {
+    const lockFiles = ['SingletonLock', 'SingletonCookie', 'SingletonSocket', 'lockfile', 'DevToolsActivePort'];
+    for (const f of lockFiles) {
+        const lockPath = path.join(profileDir, f);
+        if (fs.existsSync(lockPath)) {
+            try {
+                fs.rmSync(lockPath, { force: true });
+                console.log(`🧹 Cleaned lock file: ${f}`);
+            } catch (e) {}
+        }
+    }
+} else {
+    fs.mkdirSync(profileDir, { recursive: true });
+}
+
+console.log('🌐 Opening browser in interactive mode...\n');
 
 async function runSetup() {
-    const context = await chromium.launchPersistentContext(profileDir, {
-        headless: false,
-        viewport: { width: 1280, height: 800 },
-        args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-blink-features=AutomationControlled',
-        ],
-    });
+    let context;
+    try {
+        context = await chromium.launchPersistentContext(profileDir, {
+            headless: false,
+            viewport: { width: 1280, height: 800 },
+            args: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-blink-features=AutomationControlled',
+                '--disable-dev-shm-usage',
+            ],
+        });
+    } catch (err) {
+        console.warn('⚠️ Standard Chromium launch failed, attempting fallback launch without persistent locks...');
+        // Fallback: If persistent context failed due to lock issues, clean directory and retry
+        try {
+            fs.rmSync(profileDir, { recursive: true, force: true });
+            fs.mkdirSync(profileDir, { recursive: true });
+            context = await chromium.launchPersistentContext(profileDir, {
+                headless: false,
+                viewport: { width: 1280, height: 800 },
+                args: ['--no-sandbox', '--disable-setuid-sandbox'],
+            });
+        } catch (fallbackErr) {
+            console.error('❌ Could not launch browser:', fallbackErr.message);
+            process.exit(1);
+        }
+    }
 
-    const page = await context.newPage();
+    const page = context.pages().length > 0 ? context.pages()[0] : await context.newPage();
     console.log('🔗 Navigating to https://labs.google/fx/tools/flow...');
-    await page.goto('https://labs.google/fx/tools/flow', { waitUntil: 'domcontentloaded' });
+    await page.goto('https://labs.google/fx/tools/flow', { waitUntil: 'domcontentloaded' }).catch(() => {});
 
     console.log('\n------------------------------------------------------');
     console.log('🔑 PLEASE LOG IN TO YOUR GOOGLE ACCOUNT IN THE BROWSER.');
@@ -62,6 +99,6 @@ async function runSetup() {
 }
 
 runSetup().catch((err) => {
-    console.error('❌ Setup error:', err);
+    console.error('❌ Setup error:', err.message || err);
     process.exit(1);
 });
