@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, rmSync } from 'fs';
 import path from 'path';
 import { config } from '../config.js';
 import { logger } from '../utils/logger.js';
+import { closeSharedContext } from '../tools/googleFxFlow.js';
 
 const GOOGLE_FX_URL = 'https://labs.google/fx/tools/flow';
 
@@ -102,12 +103,7 @@ export class SessionManager {
             };
         }
 
-        if (sharedContext) {
-            try {
-                await sharedContext.close();
-            } catch (e) {}
-            sharedContext = null;
-        }
+        await closeSharedContext();
 
         let context = null;
         try {
@@ -314,12 +310,7 @@ export class SessionManager {
         try {
             writeFileSync(tempZipPath, zipBuffer);
 
-            if (sharedContext) {
-                try {
-                    await sharedContext.close();
-                } catch (e) {}
-                sharedContext = null;
-            }
+            await closeSharedContext();
 
             if (existsSync(profileDir)) {
                 rmSync(profileDir, { recursive: true, force: true });

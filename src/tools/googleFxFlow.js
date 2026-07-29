@@ -16,6 +16,16 @@ const GOOGLE_FX_URL = 'https://labs.google/fx/tools/flow';
 let sharedContext = null;
 let isInitializing = false;
 
+export async function closeSharedContext() {
+    if (sharedContext) {
+        try {
+            await sharedContext.close();
+        } catch (e) {}
+        sharedContext = null;
+    }
+}
+
+
 export class GoogleFxFlowTool extends BaseTool {
     get name() {
         return 'google_fx_flow';
