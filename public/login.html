@@ -29,8 +29,10 @@
         <!-- Header -->
         <div class="flex items-center justify-between pb-6 border-b border-slate-100 gap-4">
             <div class="flex items-center gap-3">
-                <div class="w-10 h-10 rounded-xl bg-blue-600 flex items-center justify-center text-white font-bold text-lg">
-                    ⚡
+                <div class="w-10 h-10 rounded-xl bg-slate-900 flex items-center justify-center text-white font-bold text-base">
+                    <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+                    </svg>
                 </div>
                 <div>
                     <h1 class="text-xl font-bold text-slate-900 tracking-tight">Google FX Session Manager</h1>
@@ -57,14 +59,16 @@
 
         <!-- 2. Connected State (Shown ONLY when connected & authenticated) -->
         <div id="connectedState" class="hidden mt-6">
-            <div class="bg-emerald-50 border border-emerald-200 rounded-xl p-5 mb-6">
+            <div class="bg-slate-50 border border-slate-200 rounded-xl p-5 mb-6">
                 <div class="flex items-center gap-3.5">
-                    <div class="w-10 h-10 rounded-full bg-emerald-500 text-white flex items-center justify-center text-lg font-bold shrink-0">
-                        ✓
+                    <div class="w-9 h-9 rounded-full bg-emerald-100 border border-emerald-200 text-emerald-700 flex items-center justify-center shrink-0">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"></path>
+                        </svg>
                     </div>
                     <div>
-                        <h3 class="text-base font-bold text-emerald-900">Session Connected & Authenticated!</h3>
-                        <p class="text-xs text-emerald-700 font-medium mt-0.5" id="connectedDetails">
+                        <h3 class="text-sm font-bold text-slate-900">Session Connected & Authenticated</h3>
+                        <p class="text-xs text-slate-500 font-medium mt-0.5" id="connectedDetails">
                             Google FX Flow is ready for automated generation.
                         </p>
                     </div>
@@ -73,14 +77,23 @@
 
             <!-- Action Buttons for Connected State -->
             <div class="flex flex-col sm:flex-row gap-3">
-                <button onclick="toggleForm()" id="reauthBtn" class="flex-1 py-2.5 px-4 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold text-xs rounded-xl border border-slate-200 transition-colors">
-                    ✏️ Update / Re-authenticate Session
+                <button onclick="toggleForm()" id="reauthBtn" class="flex-1 py-2.5 px-4 bg-white hover:bg-slate-50 text-slate-700 font-semibold text-xs rounded-xl border border-slate-300 transition-colors flex items-center justify-center gap-2">
+                    <svg class="w-4 h-4 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"></path>
+                    </svg>
+                    <span>Update / Re-authenticate Session</span>
                 </button>
-                <button onclick="checkStatus()" class="py-2.5 px-4 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold text-xs rounded-xl border border-slate-200 transition-colors">
-                    🔄 Re-verify Auth
+                <button onclick="checkStatus()" class="py-2.5 px-4 bg-white hover:bg-slate-50 text-slate-700 font-semibold text-xs rounded-xl border border-slate-300 transition-colors flex items-center justify-center gap-2">
+                    <svg class="w-4 h-4 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                    </svg>
+                    <span>Re-verify Auth</span>
                 </button>
-                <button onclick="clearProfile()" class="py-2.5 px-4 bg-rose-50 hover:bg-rose-100 text-rose-600 font-semibold text-xs rounded-xl border border-rose-200 transition-colors">
-                    🗑️ Reset Profile
+                <button onclick="clearProfile()" class="py-2.5 px-4 bg-white hover:bg-slate-50 text-slate-700 font-semibold text-xs rounded-xl border border-slate-300 transition-colors flex items-center justify-center gap-2">
+                    <svg class="w-4 h-4 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
+                    </svg>
+                    <span>Reset Profile</span>
                 </button>
             </div>
         </div>
@@ -88,42 +101,54 @@
         <!-- 3. Form Section (Hidden when connected unless user clicks Update) -->
         <div id="formSection" class="hidden mt-6">
             <div class="flex items-center justify-between mb-3">
-                <label class="text-sm font-semibold text-slate-700 flex items-center gap-2">
-                    <span>🔑 Import Google Session Data</span>
+                <label class="text-sm font-semibold text-slate-800 flex items-center gap-2">
+                    <svg class="w-4 h-4 text-slate-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"></path>
+                    </svg>
+                    <span>Import Google Session Data</span>
                 </label>
-                <button id="cancelFormBtn" onclick="hideFormIfConnected()" class="hidden text-xs text-slate-500 hover:text-slate-700 underline font-medium">
+                <button id="cancelFormBtn" onclick="hideFormIfConnected()" class="hidden text-xs text-slate-500 hover:text-slate-800 underline font-medium">
                     Cancel
                 </button>
             </div>
 
             <!-- Tabs -->
             <div class="flex bg-slate-100 p-1 rounded-xl border border-slate-200 mb-4 gap-1">
-                <button id="tabCookies" onclick="setTab('cookies')" class="flex-1 py-1.5 px-3 text-xs font-medium rounded-lg text-blue-700 bg-white border border-slate-200 transition-all">
+                <button id="tabCookies" onclick="setTab('cookies')" class="flex-1 py-1.5 px-3 text-xs font-semibold rounded-lg text-slate-800 bg-white border border-slate-300 transition-all">
                     Cookie Header String
                 </button>
-                <button id="tabJson" onclick="setTab('json')" class="flex-1 py-1.5 px-3 text-xs font-medium rounded-lg text-slate-600 hover:text-slate-900 transition-all">
+                <button id="tabJson" onclick="setTab('json')" class="flex-1 py-1.5 px-3 text-xs font-semibold rounded-lg text-slate-500 hover:text-slate-800 transition-all">
                     Playwright storageState JSON
                 </button>
             </div>
 
             <!-- Input Box -->
             <textarea id="sessionInput" rows="5" 
-                class="w-full bg-slate-50 border border-slate-200 rounded-xl p-3.5 text-xs font-mono text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white focus:border-transparent transition-all"
+                class="w-full bg-slate-50 border border-slate-200 rounded-xl p-3.5 text-xs font-mono text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-400 focus:bg-white transition-all"
                 placeholder="Paste your Google Cookies here...&#10;Example: __Secure-1PSID=...; __Secure-3PSID=...; SID=..."></textarea>
 
             <!-- Buttons -->
             <div class="grid grid-cols-1 sm:grid-cols-3 gap-2.5 mt-4">
                 <button onclick="saveSession()" id="saveBtn" 
-                    class="sm:col-span-1 py-2.5 px-4 bg-blue-600 hover:bg-blue-700 text-white font-semibold text-xs rounded-xl border border-blue-600 transition-colors flex items-center justify-center gap-1.5">
-                    <span>✨ Save & Connect Session</span>
+                    class="sm:col-span-1 py-2.5 px-4 bg-white hover:bg-slate-50 text-slate-700 font-semibold text-xs rounded-xl border border-slate-300 transition-colors flex items-center justify-center gap-2">
+                    <svg class="w-4 h-4 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4"></path>
+                    </svg>
+                    <span>Save & Connect Session</span>
                 </button>
                 <button onclick="checkStatus()" id="checkBtn" 
-                    class="py-2.5 px-4 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold text-xs rounded-xl border border-slate-200 transition-colors flex items-center justify-center gap-1.5">
-                    <span>🔄 Verify Status</span>
+                    class="py-2.5 px-4 bg-white hover:bg-slate-50 text-slate-700 font-semibold text-xs rounded-xl border border-slate-300 transition-colors flex items-center justify-center gap-2">
+                    <svg class="w-4 h-4 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                    </svg>
+                    <span>Verify Status</span>
                 </button>
                 <button onclick="clearProfile()" id="clearBtn" 
-                    class="py-2.5 px-4 bg-rose-50 hover:bg-rose-100 text-rose-600 font-semibold text-xs rounded-xl border border-rose-200 transition-colors flex items-center justify-center gap-1.5">
-                    <span>🗑️ Reset Profile</span>
+                    class="py-2.5 px-4 bg-white hover:bg-slate-50 text-slate-700 font-semibold text-xs rounded-xl border border-slate-300 transition-colors flex items-center justify-center gap-2">
+                    <svg class="w-4 h-4 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
+                    </svg>
+                    <span>Reset Profile</span>
                 </button>
             </div>
         </div>
@@ -133,15 +158,18 @@
 
         <!-- Quick Guide (Shown ONLY when form is open) -->
         <div id="quickGuide" class="hidden mt-6 pt-5 border-t border-slate-100">
-            <div class="bg-blue-50/50 border border-blue-100 rounded-xl p-4">
-                <h3 class="text-xs font-bold text-blue-900 flex items-center gap-1.5 mb-1.5">
-                    <span>📖 Step-by-Step Guide: How to Get Google Session Cookies</span>
+            <div class="bg-slate-50 border border-slate-200 rounded-xl p-4">
+                <h3 class="text-xs font-bold text-slate-900 flex items-center gap-1.5 mb-1.5">
+                    <svg class="w-4 h-4 text-slate-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"></path>
+                    </svg>
+                    <span>Step-by-Step Guide: How to Get Google Session Cookies</span>
                 </h3>
-                <ol class="list-decimal list-inside text-xs text-blue-950/80 space-y-1 leading-relaxed">
-                    <li>Open <a href="https://labs.google/fx/tools/flow" target="_blank" class="underline font-semibold text-blue-600 hover:text-blue-800">labs.google/fx/tools/flow</a> while logged in with your Google account.</li>
-                    <li>Press <kbd class="px-1 py-0.5 bg-white border border-blue-200 rounded text-xs font-mono font-semibold">F12</kbd> or <kbd class="px-1 py-0.5 bg-white border border-blue-200 rounded text-xs font-mono font-semibold">Cmd + Option + I</kbd> → <strong>Network</strong> tab.</li>
-                    <li>Refresh page → Click any request to <code class="bg-white px-1 py-0.5 rounded text-blue-700 font-mono border border-blue-200">labs.google</code>.</li>
-                    <li>Right-click → <strong>Copy</strong> → <strong>Copy request headers</strong> (or copy the <code class="bg-white px-1 py-0.5 rounded text-blue-700 font-mono border border-blue-200">Cookie:</code> header value).</li>
+                <ol class="list-decimal list-inside text-xs text-slate-600 space-y-1 leading-relaxed">
+                    <li>Open <a href="https://labs.google/fx/tools/flow" target="_blank" class="underline font-semibold text-slate-800 hover:text-black">labs.google/fx/tools/flow</a> while logged in with your Google account.</li>
+                    <li>Press <kbd class="px-1 py-0.5 bg-white border border-slate-300 rounded text-xs font-mono font-semibold">F12</kbd> or <kbd class="px-1 py-0.5 bg-white border border-slate-300 rounded text-xs font-mono font-semibold">Cmd + Option + I</kbd> → <strong>Network</strong> tab.</li>
+                    <li>Refresh page → Click any request to <code class="bg-white px-1 py-0.5 rounded text-slate-800 font-mono border border-slate-200">labs.google</code>.</li>
+                    <li>Right-click → <strong>Copy</strong> → <strong>Copy request headers</strong> (or copy the <code class="bg-white px-1 py-0.5 rounded text-slate-800 font-mono border border-slate-200">Cookie:</code> header value).</li>
                     <li>Paste in the box above and click <strong>Save & Connect Session</strong>.</li>
                 </ol>
             </div>
@@ -160,12 +188,12 @@
             const input = document.getElementById('sessionInput');
 
             if (tab === 'cookies') {
-                tabCookies.className = 'flex-1 py-1.5 px-3 text-xs font-medium rounded-lg text-blue-700 bg-white border border-slate-200 transition-all';
-                tabJson.className = 'flex-1 py-1.5 px-3 text-xs font-medium rounded-lg text-slate-600 hover:text-slate-900 transition-all';
+                tabCookies.className = 'flex-1 py-1.5 px-3 text-xs font-semibold rounded-lg text-slate-800 bg-white border border-slate-300 transition-all';
+                tabJson.className = 'flex-1 py-1.5 px-3 text-xs font-semibold rounded-lg text-slate-500 hover:text-slate-800 transition-all';
                 input.placeholder = 'Paste your Cookie Header string here...\nExample: __Secure-1PSID=...; __Secure-3PSID=...; SID=...';
             } else {
-                tabJson.className = 'flex-1 py-1.5 px-3 text-xs font-medium rounded-lg text-blue-700 bg-white border border-slate-200 transition-all';
-                tabCookies.className = 'flex-1 py-1.5 px-3 text-xs font-medium rounded-lg text-slate-600 hover:text-slate-900 transition-all';
+                tabJson.className = 'flex-1 py-1.5 px-3 text-xs font-semibold rounded-lg text-slate-800 bg-white border border-slate-300 transition-all';
+                tabCookies.className = 'flex-1 py-1.5 px-3 text-xs font-semibold rounded-lg text-slate-500 hover:text-slate-800 transition-all';
                 input.placeholder = 'Paste Playwright storageState JSON object here...\nExample: { "cookies": [...], "origins": [...] }';
             }
         }
@@ -269,7 +297,7 @@
             const btn = document.getElementById('saveBtn');
             btn.disabled = true;
             btn.classList.add('opacity-70', 'cursor-not-allowed');
-            btn.innerHTML = '<span>⏳ Importing & Testing...</span>';
+            btn.innerHTML = '<span>Importing & Testing...</span>';
             showLog('🚀 Sending session data to VPS session manager...');
 
             try {
@@ -298,7 +326,11 @@
             } finally {
                 btn.disabled = false;
                 btn.classList.remove('opacity-70', 'cursor-not-allowed');
-                btn.innerHTML = '<span>✨ Save & Connect Session</span>';
+                btn.innerHTML = `
+                    <svg class="w-4 h-4 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4"></path>
+                    </svg>
+                    <span>Save & Connect Session</span>`;
             }
         }
 
