@@ -47,7 +47,7 @@
             </div>
         </div>
 
-        <!-- 1. Skeleton Loader (Shown during initial status check) -->
+        <!-- 1. Skeleton Loader (Shown during status check) -->
         <div id="skeletonLoader" class="mt-6 space-y-4 animate-pulse">
             <div class="h-4 bg-slate-200 rounded w-1/3"></div>
             <div class="h-24 bg-slate-100 border border-slate-200/60 rounded-xl p-4 space-y-3">
@@ -57,7 +57,7 @@
             <div class="h-10 bg-slate-200 rounded-xl w-full"></div>
         </div>
 
-        <!-- 2. Connected State (Shown ONLY when connected & authenticated) -->
+        <!-- 2. SECTION A: Connected State (Shown ONLY when connected & authenticated) -->
         <div id="connectedState" class="hidden mt-6">
             <div class="bg-slate-50 border border-slate-200 rounded-xl p-5 mb-6">
                 <div class="flex items-center gap-4">
@@ -101,7 +101,7 @@
             </div>
         </div>
 
-        <!-- 3. Form Section (Hidden when connected unless user clicks Update) -->
+        <!-- 3. SECTION B: Form Section (Shown ONLY when form is open, hides SECTION A) -->
         <div id="formSection" class="hidden mt-6">
             <div class="flex items-center justify-between mb-3">
                 <label class="text-sm font-semibold text-slate-800 flex items-center gap-2">
@@ -110,8 +110,8 @@
                     </svg>
                     <span>Import Google Session Data</span>
                 </label>
-                <button id="cancelFormBtn" onclick="hideFormIfConnected()" class="hidden text-xs text-slate-500 hover:text-slate-800 underline font-medium">
-                    Cancel
+                <button id="cancelFormBtn" onclick="cancelForm()" class="hidden text-xs text-slate-500 hover:text-slate-800 underline font-medium">
+                    ← Back to Connected Profile
                 </button>
             </div>
 
@@ -211,22 +211,24 @@
 
         function toggleForm() {
             const form = document.getElementById('formSection');
+            const connectedState = document.getElementById('connectedState');
             const guide = document.getElementById('quickGuide');
             const cancelBtn = document.getElementById('cancelFormBtn');
-            if (form.classList.contains('hidden')) {
-                form.classList.remove('hidden');
-                guide.classList.remove('hidden');
+
+            // Open Form, hide Connected State
+            form.classList.remove('hidden');
+            guide.classList.remove('hidden');
+            connectedState.classList.add('hidden');
+            if (isAuthenticated) {
                 cancelBtn.classList.remove('hidden');
-            } else {
-                hideFormIfConnected();
             }
         }
 
-        function hideFormIfConnected() {
+        function cancelForm() {
             if (isAuthenticated) {
                 document.getElementById('formSection').classList.add('hidden');
                 document.getElementById('quickGuide').classList.add('hidden');
-                document.getElementById('cancelFormBtn').classList.add('hidden');
+                document.getElementById('connectedState').classList.remove('hidden');
             }
         }
 
