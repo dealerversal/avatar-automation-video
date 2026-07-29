@@ -126,7 +126,7 @@
             </div>
 
             <!-- Clickable Cloud Upload Zone -->
-            <label for="zipFileInput" class="group border-2 border-dashed border-slate-200 hover:border-slate-400 bg-slate-50/70 hover:bg-slate-100/70 rounded-2xl p-8 text-center cursor-pointer transition-all flex flex-col items-center justify-center">
+            <label id="uploadDropZone" for="zipFileInput" class="group border-2 border-dashed border-slate-200 hover:border-slate-400 bg-slate-50/70 hover:bg-slate-100/70 rounded-2xl p-8 text-center cursor-pointer transition-all flex flex-col items-center justify-center">
                 <div class="w-14 h-14 rounded-2xl bg-white border border-slate-200 group-hover:border-slate-300 flex items-center justify-center text-slate-500 group-hover:text-slate-900 transition-all mb-2">
                     <svg class="w-7 h-7" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"></path>
@@ -135,6 +135,27 @@
                 <span id="uploadStatusText" class="text-xs font-medium text-slate-400 group-hover:text-slate-600 transition-colors">Click or drop profile zip to upload</span>
                 <input type="file" id="zipFileInput" accept=".zip" onchange="autoUploadFile()" class="hidden">
             </label>
+
+            <!-- Upload Progress Container (Shown during upload) -->
+            <div id="uploadProgressContainer" class="hidden border border-slate-200 bg-slate-50/80 rounded-2xl p-5 space-y-3">
+                <div class="flex items-center justify-between">
+                    <div class="flex items-center gap-2.5 min-w-0">
+                        <svg class="w-5 h-5 text-blue-600 animate-spin shrink-0" fill="none" viewBox="0 0 24 24">
+                            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                        </svg>
+                        <span id="uploadProgressFileName" class="text-xs font-semibold text-slate-800 truncate">Uploading profile...</span>
+                    </div>
+                    <span id="uploadProgressPercent" class="text-xs font-mono font-bold text-blue-600 shrink-0">0%</span>
+                </div>
+
+                <!-- Progress Bar -->
+                <div class="w-full bg-slate-200 rounded-full h-2 overflow-hidden">
+                    <div id="uploadProgressBar" class="bg-blue-600 h-2 rounded-full transition-all duration-150 ease-out" style="width: 0%"></div>
+                </div>
+
+                <p id="uploadProgressSubtext" class="text-[11px] text-slate-500 font-medium text-center truncate">Uploading zip payload to VPS...</p>
+            </div>
         </div>
 
         <!-- Log Console -->
@@ -247,53 +268,78 @@
             }
         }
 
-        async function autoUploadFile() {
+        function autoUploadFile() {
             const fileInput = document.getElementById('zipFileInput');
             if (!fileInput.files || fileInput.files.length === 0) return;
 
             const file = fileInput.files[0];
-            const statusText = document.getElementById('uploadStatusText');
-            
-            if (statusText) {
-                statusText.innerText = `Uploading ${file.name}...`;
-                statusText.className = 'text-xs font-semibold text-blue-600 animate-pulse';
-            }
+            const dropZone = document.getElementById('uploadDropZone');
+            const progressContainer = document.getElementById('uploadProgressContainer');
+            const fileNameElem = document.getElementById('uploadProgressFileName');
+            const percentElem = document.getElementById('uploadProgressPercent');
+            const progressBar = document.getElementById('uploadProgressBar');
+            const subtextElem = document.getElementById('uploadProgressSubtext');
+
+            // Show Progress card, hide drop zone
+            dropZone.classList.add('hidden');
+            progressContainer.classList.remove('hidden');
+            fileNameElem.innerText = `Uploading ${file.name}`;
+            percentElem.innerText = '0%';
+            progressBar.style.width = '0%';
+            subtextElem.innerText = `Uploading ${(file.size / (1024 * 1024)).toFixed(1)} MB zip payload to VPS...`;
 
             showLog(`🚀 Uploading ${file.name} (${(file.size / (1024 * 1024)).toFixed(2)} MB) to VPS...`);
 
-            try {
-                const res = await fetch('/api/session/upload-zip', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/zip' },
-                    body: file,
-                });
+            const xhr = new XMLHttpRequest();
+            xhr.open('POST', '/api/session/upload-zip', true);
+            xhr.setRequestHeader('Content-Type', 'application/zip');
 
-                let data = {};
-                const contentType = res.headers.get('content-type') || '';
-                if (contentType.includes('application/json')) {
-                    data = await res.json();
-                } else {
-                    const errText = await res.text();
-                    data = { success: false, error: `HTTP ${res.status}: ${res.statusText || 'Upload Error'}` };
-                }
+            xhr.upload.onprogress = function (e) {
+                if (e.lengthComputable) {
+                    const percent = Math.round((e.loaded / e.total) * 100);
+                    progressBar.style.width = percent + '%';
+                    percentElem.innerText = percent + '%';
 
-                if (data.success) {
-                    showLog(`✅ ${data.message}`, 'success');
-                    await checkStatus();
-                } else {
-                    showLog(`❌ Failed to upload profile zip: ${data.error}`, 'error');
-                    if (statusText) {
-                        statusText.innerText = 'Upload failed. Click to try again.';
-                        statusText.className = 'text-xs font-medium text-rose-500';
+                    if (percent >= 100) {
+                        subtextElem.innerText = 'Extracting zip & verifying Google session on VPS...';
+                    } else {
+                        const loadedMb = (e.loaded / (1024 * 1024)).toFixed(1);
+                        const totalMb = (e.total / (1024 * 1024)).toFixed(1);
+                        subtextElem.innerText = `Uploaded ${loadedMb} MB / ${totalMb} MB (${percent}%)`;
                     }
                 }
-            } catch (err) {
-                showLog(`❌ Upload error: ${err.message}`, 'error');
-                if (statusText) {
-                    statusText.innerText = 'Upload error. Click to try again.';
-                    statusText.className = 'text-xs font-medium text-rose-500';
+            };
+
+            xhr.onload = async function () {
+                dropZone.classList.remove('hidden');
+                progressContainer.classList.add('hidden');
+                fileInput.value = '';
+
+                if (xhr.status >= 200 && xhr.status < 300) {
+                    try {
+                        const data = JSON.parse(xhr.responseText);
+                        if (data.success) {
+                            showLog(`✅ ${data.message}`, 'success');
+                            await checkStatus();
+                        } else {
+                            showLog(`❌ Failed to save session: ${data.error}`, 'error');
+                        }
+                    } catch (e) {
+                        showLog(`❌ Response parse error: ${e.message}`, 'error');
+                    }
+                } else {
+                    showLog(`❌ HTTP Error ${xhr.status}: ${xhr.statusText || 'Upload Failed'}`, 'error');
                 }
-            }
+            };
+
+            xhr.onerror = function () {
+                dropZone.classList.remove('hidden');
+                progressContainer.classList.add('hidden');
+                fileInput.value = '';
+                showLog('❌ Network error during file upload.', 'error');
+            };
+
+            xhr.send(file);
         }
 
         async function clearProfile() {
