@@ -287,6 +287,69 @@ export class SessionManager {
     }
 
     /**
+     * Uploads and extracts a browser-profile.zip archive into the VPS profile directory.
+     */
+    static async uploadProfileZip(zipBuffer) {
+        const profileDir = config.browser.profileDir;
+        logger.info(`[SessionManager] Uploading browser profile zip into: ${profileDir}`);
+
+        if (!zipBuffer || zipBuffer.length === 0) {
+            throw new Error('No zip file data received.');
+        }
+
+        const tempZipPath = path.join('/tmp', `browser-profile-${Date.now()}.zip`);
+        const { writeFileSync, unlinkSync, readdirSync, cpSync } = await import('fs');
+        const { execSync } = await import('child_process');
+
+        try {
+            writeFileSync(tempZipPath, zipBuffer);
+
+            if (existsSync(profileDir)) {
+                rmSync(profileDir, { recursive: true, force: true });
+            }
+            mkdirSync(profileDir, { recursive: true });
+
+            execSync(`unzip -o ${tempZipPath} -d ${profileDir}`);
+
+            const lockFiles = ['SingletonLock', 'SingletonCookie', 'SingletonSocket', 'lockfile'];
+            for (const file of lockFiles) {
+                const lockPath = path.join(profileDir, file);
+                if (existsSync(lockPath)) {
+                    rmSync(lockPath, { force: true });
+                }
+            }
+
+            const nestedProfile = path.join(profileDir, 'browser-profile');
+            if (existsSync(nestedProfile)) {
+                cpSync(nestedProfile, profileDir, { recursive: true });
+                rmSync(nestedProfile, { recursive: true, force: true });
+            }
+
+            if (existsSync(tempZipPath)) {
+                unlinkSync(tempZipPath);
+            }
+
+            logger.info(`[SessionManager] Successfully extracted browser profile zip. Verifying auth status...`);
+
+            const statusResult = await this.checkStatus();
+
+            return {
+                success: true,
+                ...statusResult,
+                message: statusResult.authenticated
+                    ? 'Browser profile uploaded, extracted, and authenticated successfully!'
+                    : 'Browser profile uploaded and extracted successfully!',
+            };
+        } catch (error) {
+            if (existsSync(tempZipPath)) {
+                try { unlinkSync(tempZipPath); } catch (e) {}
+            }
+            logger.error('[SessionManager] Failed to extract uploaded profile zip:', error);
+            throw new Error(`Failed to extract uploaded profile zip: ${error.message}`);
+        }
+    }
+
+    /**
      * Clears the current persistent profile directory on VPS.
      */
     static async clearSession() {

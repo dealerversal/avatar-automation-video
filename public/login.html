@@ -91,9 +91,9 @@
             <div class="flex flex-col sm:flex-row gap-2.5 sm:gap-3">
                 <button onclick="toggleForm()" id="reauthBtn" class="w-full sm:flex-1 py-2.5 px-4 bg-white hover:bg-slate-50 text-slate-700 font-semibold text-xs rounded-xl border border-slate-300 transition-colors flex items-center justify-center gap-2">
                     <svg class="w-4 h-4 text-slate-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"></path>
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path>
                     </svg>
-                    <span>Update / Re-authenticate Session</span>
+                    <span>Upload New Browser Profile</span>
                 </button>
                 <button onclick="checkStatus()" class="w-full sm:w-auto py-2.5 px-4 bg-white hover:bg-slate-50 text-slate-700 font-semibold text-xs rounded-xl border border-slate-300 transition-colors flex items-center justify-center gap-2">
                     <svg class="w-4 h-4 text-slate-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -110,14 +110,14 @@
             </div>
         </div>
 
-        <!-- 3. SECTION B: Simplified Form Section -->
+        <!-- 3. SECTION B: Profile Upload / Import Section -->
         <div id="formSection" class="hidden mt-6">
             <div class="flex items-center justify-between gap-3 mb-4">
                 <h2 class="text-sm font-semibold text-slate-800 flex items-center gap-2">
                     <svg class="w-4 h-4 text-slate-600 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"></path>
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path>
                     </svg>
-                    <span>Import Google Session Data</span>
+                    <span>Upload Local Browser Profile</span>
                 </h2>
                 <button id="cancelFormBtn" onclick="cancelForm()" class="hidden py-1.5 px-3 bg-white hover:bg-slate-50 text-slate-700 font-semibold text-xs rounded-lg border border-slate-300 transition-colors flex items-center gap-1.5 shrink-0">
                     <svg class="w-3.5 h-3.5 text-slate-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -127,35 +127,33 @@
                 </button>
             </div>
 
-            <!-- Login Mode Selector Tabs -->
+            <!-- Mode Selector Tabs -->
             <div class="flex bg-slate-100 p-1 rounded-xl border border-slate-200 mb-4 gap-1">
-                <button id="modeCookies" onclick="setMode('cookies')" class="flex-1 py-2 px-2.5 text-xs font-semibold rounded-lg text-slate-800 bg-white border border-slate-300 transition-all text-center">
-                    Paste Google Cookies / JSON
+                <button id="modeZip" onclick="setMode('zip')" class="flex-1 py-2 px-2.5 text-xs font-semibold rounded-lg text-slate-800 bg-white border border-slate-300 transition-all text-center">
+                    📁 Upload browser-profile.zip (Recommended)
                 </button>
-                <button id="modeCreds" onclick="setMode('creds')" class="flex-1 py-2 px-2.5 text-xs font-semibold rounded-lg text-slate-500 hover:text-slate-800 transition-all text-center">
-                    Google Email & Password
+                <button id="modeCookies" onclick="setMode('cookies')" class="flex-1 py-2 px-2.5 text-xs font-semibold rounded-lg text-slate-500 hover:text-slate-800 transition-all text-center">
+                    🔑 Paste Google Cookies Header
                 </button>
             </div>
 
-            <!-- Mode 1: Cookie Input -->
-            <div id="cookieBox">
+            <!-- Mode 1: Zip File Upload -->
+            <div id="zipBox" class="space-y-3">
+                <div class="border-2 border-dashed border-slate-200 hover:border-slate-400 bg-slate-50/50 rounded-xl p-6 text-center transition-all">
+                    <svg class="w-10 h-10 text-slate-400 mx-auto mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"></path>
+                    </svg>
+                    <p class="text-xs font-semibold text-slate-800 mb-1">Select or drop your local <code class="bg-slate-200 px-1 py-0.5 rounded font-mono text-[11px]">browser-profile.zip</code> file</p>
+                    <p class="text-[11px] text-slate-500 mb-3">Login locally → Zip your local <code class="font-mono">browser-profile</code> folder → Upload here</p>
+                    <input type="file" id="zipFileInput" accept=".zip" class="block w-full text-xs text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border file:border-slate-300 file:text-xs file:font-semibold file:bg-white file:text-slate-700 hover:file:bg-slate-50 cursor-pointer">
+                </div>
+            </div>
+
+            <!-- Mode 2: Cookie Header Paste -->
+            <div id="cookieBox" class="hidden">
                 <textarea id="sessionInput" rows="5" 
                     class="w-full bg-slate-50 border border-slate-200 rounded-xl p-3.5 text-xs font-mono text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-400 focus:bg-white transition-all"
                     placeholder="Paste your Google Cookies string here...&#10;Example: __Secure-1PSID=...; __Secure-3PSID=...; SID=..."></textarea>
-            </div>
-
-            <!-- Mode 2: Google Credentials Input -->
-            <div id="credsBox" class="hidden space-y-3">
-                <div>
-                    <label class="block text-xs font-semibold text-slate-700 mb-1">Google Email Address</label>
-                    <input type="email" id="googleEmail" placeholder="your-email@gmail.com" 
-                        class="w-full bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2.5 text-xs font-sans text-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-400 focus:bg-white transition-all">
-                </div>
-                <div>
-                    <label class="block text-xs font-semibold text-slate-700 mb-1">Google Password</label>
-                    <input type="password" id="googlePassword" placeholder="••••••••••••" 
-                        class="w-full bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2.5 text-xs font-sans text-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-400 focus:bg-white transition-all">
-                </div>
             </div>
 
             <!-- Action Buttons -->
@@ -163,9 +161,9 @@
                 <button onclick="saveSession()" id="saveBtn" 
                     class="sm:col-span-1 py-2.5 px-4 bg-white hover:bg-slate-50 text-slate-700 font-semibold text-xs rounded-xl border border-slate-300 transition-colors flex items-center justify-center gap-2">
                     <svg class="w-4 h-4 text-slate-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4"></path>
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path>
                     </svg>
-                    <span>Save & Connect Session</span>
+                    <span>Upload & Connect Profile</span>
                 </button>
                 <button onclick="checkStatus()" id="checkBtn" 
                     class="py-2.5 px-4 bg-white hover:bg-slate-50 text-slate-700 font-semibold text-xs rounded-xl border border-slate-300 transition-colors flex items-center justify-center gap-2">
@@ -192,16 +190,14 @@
             <div class="bg-slate-50 border border-slate-200 rounded-xl p-4">
                 <h3 class="text-xs font-bold text-slate-900 flex items-center gap-1.5 mb-1.5">
                     <svg class="w-4 h-4 text-slate-600 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"></path>
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
                     </svg>
-                    <span>Step-by-Step Guide: How to Get Google Session Cookies</span>
+                    <span>How to Upload Your Local Profile in 3 Simple Steps</span>
                 </h3>
                 <ol class="list-decimal list-inside text-xs text-slate-600 space-y-1.5 leading-relaxed">
-                    <li>Open <a href="https://labs.google/fx/tools/flow" target="_blank" class="underline font-semibold text-slate-800 hover:text-black">labs.google/fx/tools/flow</a> while logged in with your Google account.</li>
-                    <li>Press <kbd class="px-1 py-0.5 bg-white border border-slate-300 rounded text-xs font-mono font-semibold">F12</kbd> or <kbd class="px-1 py-0.5 bg-white border border-slate-300 rounded text-xs font-mono font-semibold">Cmd + Option + I</kbd> → <strong>Network</strong> tab.</li>
-                    <li>Refresh page → Click any request to <code class="bg-white px-1 py-0.5 rounded text-slate-800 font-mono border border-slate-200">labs.google</code>.</li>
-                    <li>Right-click → <strong>Copy</strong> → <strong>Copy request headers</strong> (or copy the <code class="bg-white px-1 py-0.5 rounded text-slate-800 font-mono border border-slate-200">Cookie:</code> header value).</li>
-                    <li>Paste in the box above and click <strong>Save & Connect Session</strong>.</li>
+                    <li>Log in to Google FX Flow locally on your laptop.</li>
+                    <li>Compress/Zip your local <code class="bg-white px-1 py-0.5 rounded text-slate-800 font-mono border border-slate-200">browser-profile</code> folder into <code class="bg-white px-1 py-0.5 rounded text-slate-800 font-mono border border-slate-200">browser-profile.zip</code>.</li>
+                    <li>Select <code class="bg-white px-1 py-0.5 rounded text-slate-800 font-mono border border-slate-200">browser-profile.zip</code> above and click <strong>Upload & Connect Profile</strong>.</li>
                 </ol>
             </div>
         </div>
@@ -210,25 +206,25 @@
 
     <script>
         let isAuthenticated = false;
-        let activeMode = 'cookies';
+        let activeMode = 'zip';
 
         function setMode(mode) {
             activeMode = mode;
+            const modeZip = document.getElementById('modeZip');
             const modeCookies = document.getElementById('modeCookies');
-            const modeCreds = document.getElementById('modeCreds');
+            const zipBox = document.getElementById('zipBox');
             const cookieBox = document.getElementById('cookieBox');
-            const credsBox = document.getElementById('credsBox');
 
-            if (mode === 'cookies') {
-                modeCookies.className = 'flex-1 py-2 px-2.5 text-xs font-semibold rounded-lg text-slate-800 bg-white border border-slate-300 transition-all text-center';
-                modeCreds.className = 'flex-1 py-2 px-2.5 text-xs font-semibold rounded-lg text-slate-500 hover:text-slate-800 transition-all text-center';
-                cookieBox.classList.remove('hidden');
-                credsBox.classList.add('hidden');
-            } else {
-                modeCreds.className = 'flex-1 py-2 px-2.5 text-xs font-semibold rounded-lg text-slate-800 bg-white border border-slate-300 transition-all text-center';
+            if (mode === 'zip') {
+                modeZip.className = 'flex-1 py-2 px-2.5 text-xs font-semibold rounded-lg text-slate-800 bg-white border border-slate-300 transition-all text-center';
                 modeCookies.className = 'flex-1 py-2 px-2.5 text-xs font-semibold rounded-lg text-slate-500 hover:text-slate-800 transition-all text-center';
-                credsBox.classList.remove('hidden');
+                zipBox.classList.remove('hidden');
                 cookieBox.classList.add('hidden');
+            } else {
+                modeCookies.className = 'flex-1 py-2 px-2.5 text-xs font-semibold rounded-lg text-slate-800 bg-white border border-slate-300 transition-all text-center';
+                modeZip.className = 'flex-1 py-2 px-2.5 text-xs font-semibold rounded-lg text-slate-500 hover:text-slate-800 transition-all text-center';
+                cookieBox.classList.remove('hidden');
+                zipBox.classList.add('hidden');
             }
         }
 
@@ -343,59 +339,90 @@
         }
 
         async function saveSession() {
-            let payload = {};
+            const btn = document.getElementById('saveBtn');
 
-            if (activeMode === 'cookies') {
-                const inputVal = document.getElementById('sessionInput').value.trim();
-                if (!inputVal) {
-                    alert('Please paste your cookies or storageState JSON first!');
+            if (activeMode === 'zip') {
+                const fileInput = document.getElementById('zipFileInput');
+                if (!fileInput.files || fileInput.files.length === 0) {
+                    alert('Please select your browser-profile.zip file first!');
                     return;
                 }
+
+                const file = fileInput.files[0];
+                btn.disabled = true;
+                btn.classList.add('opacity-70', 'cursor-not-allowed');
+                btn.innerHTML = '<span>Uploading & Extracting Zip...</span>';
+                showLog(`🚀 Uploading ${file.name} (${(file.size / (1024 * 1024)).toFixed(2)} MB) to VPS...`);
+
+                try {
+                    const res = await fetch('/api/session/upload-zip', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/zip' },
+                        body: file,
+                    });
+
+                    const data = await res.json();
+                    if (data.success) {
+                        showLog(`✅ ${data.message}`, 'success');
+                        await checkStatus();
+                    } else {
+                        showLog(`❌ Failed to upload profile zip: ${data.error}`, 'error');
+                    }
+                } catch (err) {
+                    showLog(`❌ Upload error: ${err.message}`, 'error');
+                } finally {
+                    btn.disabled = false;
+                    btn.classList.remove('opacity-70', 'cursor-not-allowed');
+                    btn.innerHTML = `
+                        <svg class="w-4 h-4 text-slate-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path>
+                        </svg>
+                        <span>Upload & Connect Profile</span>`;
+                }
+            } else {
+                const inputVal = document.getElementById('sessionInput').value.trim();
+                if (!inputVal) {
+                    alert('Please paste your Google cookies header first!');
+                    return;
+                }
+
+                let payload = {};
                 if (inputVal.startsWith('{') || inputVal.startsWith('[')) {
                     payload = { storageState: JSON.parse(inputVal) };
                 } else {
                     payload = { cookies: inputVal };
                 }
-            } else {
-                const email = document.getElementById('googleEmail').value.trim();
-                const password = document.getElementById('googlePassword').value.trim();
-                if (!email || !password) {
-                    alert('Please enter both your Google Email and Password!');
-                    return;
+
+                btn.disabled = true;
+                btn.classList.add('opacity-70', 'cursor-not-allowed');
+                btn.innerHTML = '<span>Importing Cookies...</span>';
+                showLog('🚀 Sending cookie session data to VPS...');
+
+                try {
+                    const res = await fetch('/api/session/import', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload),
+                    });
+
+                    const data = await res.json();
+                    if (data.success) {
+                        showLog(`✅ ${data.message} (${data.cookiesStored} cookies set)`, 'success');
+                        await checkStatus();
+                    } else {
+                        showLog(`❌ Failed to save session: ${data.error}`, 'error');
+                    }
+                } catch (err) {
+                    showLog(`❌ Error: ${err.message}`, 'error');
+                } finally {
+                    btn.disabled = false;
+                    btn.classList.remove('opacity-70', 'cursor-not-allowed');
+                    btn.innerHTML = `
+                        <svg class="w-4 h-4 text-slate-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path>
+                        </svg>
+                        <span>Upload & Connect Profile</span>`;
                 }
-                payload = { email, password };
-            }
-
-            const btn = document.getElementById('saveBtn');
-            btn.disabled = true;
-            btn.classList.add('opacity-70', 'cursor-not-allowed');
-            btn.innerHTML = '<span>Authenticating & Testing...</span>';
-            showLog('🚀 Connecting to Google and saving session profile on VPS...');
-
-            try {
-                const res = await fetch('/api/session/import', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(payload),
-                });
-
-                const data = await res.json();
-                if (data.success) {
-                    showLog(`✅ ${data.message} (${data.cookiesStored} cookies set)`, 'success');
-                    await checkStatus();
-                } else {
-                    showLog(`❌ Failed to save session: ${data.error}`, 'error');
-                }
-            } catch (err) {
-                showLog(`❌ Error: ${err.message}`, 'error');
-            } finally {
-                btn.disabled = false;
-                btn.classList.remove('opacity-70', 'cursor-not-allowed');
-                btn.innerHTML = `
-                    <svg class="w-4 h-4 text-slate-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4"></path>
-                    </svg>
-                    <span>Save & Connect Session</span>`;
             }
         }
 
