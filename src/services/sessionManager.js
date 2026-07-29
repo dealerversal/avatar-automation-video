@@ -200,9 +200,9 @@ export class SessionManager {
     }
 
     /**
-     * Imports cookies/storageState into the persistent browser profile.
+     * Imports cookies/storageState OR performs automated Google credentials login into persistent profile.
      */
-    static async importSession(inputData) {
+    static async importSession(payload) {
         const profileDir = config.browser.profileDir;
         logger.info(`[SessionManager] Importing session into profile: ${profileDir}`);
 
@@ -210,10 +210,11 @@ export class SessionManager {
             mkdirSync(profileDir, { recursive: true });
         }
 
-        const cookiesToSet = parseCookiesInput(inputData);
+        const { cookies, storageState, email, password } = payload || {};
+        const inputData = storageState || cookies;
 
-        if (!cookiesToSet || cookiesToSet.length === 0) {
-            throw new Error('No valid cookies or storage state could be parsed from input.');
+        if (!inputData && (!email || !password)) {
+            throw new Error('Please provide either cookies/storageState OR Google Email & Password.');
         }
 
         let context = null;
@@ -230,33 +231,38 @@ export class SessionManager {
                 viewport: { width: 1280, height: 720 },
             });
 
-            // If storageState object with origins/localStorage was provided
-            if (typeof inputData === 'object' && inputData.origins && Array.isArray(inputData.origins)) {
-                for (const originState of inputData.origins) {
-                    if (originState.origin && Array.isArray(originState.localStorage)) {
-                        const page = await context.newPage();
-                        try {
-                            await page.goto(originState.origin, { waitUntil: 'domcontentloaded', timeout: 15000 });
-                            for (const item of originState.localStorage) {
-                                await page.evaluate(
-                                    ({ k, v }) => localStorage.setItem(k, v),
-                                    { k: item.name, v: item.value }
-                                );
-                            }
-                        } catch (e) {
-                            logger.warn(`[SessionManager] Could not set localStorage for ${originState.origin}: ${e.message}`);
-                        } finally {
-                            await page.close().catch(() => {});
-                        }
-                    }
+            const page = await context.newPage();
+
+            // Perform Automated Google Credential Login if email & password are provided
+            if (email && password) {
+                logger.info(`[SessionManager] Performing Google Sign-In for email: ${email}`);
+                await page.goto('https://accounts.google.com/signin', { waitUntil: 'domcontentloaded', timeout: 30000 });
+                await page.waitForTimeout(1500);
+
+                const emailInput = page.locator('input[type="email"]');
+                if (await emailInput.count() > 0) {
+                    await emailInput.fill(email);
+                    await page.click('#identifierNext, button:has-text("Next")');
+                    await page.waitForTimeout(2500);
+                }
+
+                const passwordInput = page.locator('input[type="password"]');
+                if (await passwordInput.count() > 0) {
+                    await passwordInput.fill(password);
+                    await page.click('#passwordNext, button:has-text("Next")');
+                    await page.waitForTimeout(4000);
                 }
             }
 
-            // Set all cookies across google domains
-            await context.addCookies(cookiesToSet);
+            // Inject cookies / storageState if provided
+            if (inputData) {
+                const cookiesToSet = parseCookiesInput(inputData);
+                if (cookiesToSet && cookiesToSet.length > 0) {
+                    await context.addCookies(cookiesToSet);
+                }
+            }
 
-            // Test navigation to FX Flow
-            const page = await context.newPage();
+            // Verify Google FX Flow navigation
             await page.goto(GOOGLE_FX_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
             await page.waitForTimeout(3000);
 
@@ -265,13 +271,13 @@ export class SessionManager {
 
             await context.close();
 
-            logger.info(`[SessionManager] Successfully imported ${cookiesStored.length} cookies into persistent profile.`);
+            logger.info(`[SessionManager] Successfully saved profile with ${cookiesStored.length} cookies.`);
 
             return {
                 success: true,
                 cookiesStored: cookiesStored.length,
                 finalUrl,
-                message: 'Session successfully imported and saved into VPS browser profile!',
+                message: 'Google session successfully authenticated and saved into VPS profile!',
             };
         } catch (error) {
             if (context) await context.close().catch(() => {});

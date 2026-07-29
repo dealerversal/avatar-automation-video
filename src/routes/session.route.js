@@ -19,17 +19,7 @@ router.get('/status', async (req, res) => {
 // POST /api/session/import
 router.post('/import', async (req, res) => {
     try {
-        const { cookies, storageState } = req.body;
-        const inputData = storageState || cookies;
-
-        if (!inputData) {
-            return res.status(400).json({
-                success: false,
-                error: 'Missing cookies or storageState in request body.',
-            });
-        }
-
-        const result = await SessionManager.importSession(inputData);
+        const result = await SessionManager.importSession(req.body);
         res.json({ success: true, ...result });
     } catch (error) {
         logger.error('[SessionRoute] Import session error:', error);
