@@ -1,4 +1,3 @@
-// src/server.js
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
@@ -11,6 +10,7 @@ import { connectDB } from './db.js';
 import { logger } from './utils/logger.js';
 import { registry } from './mcp/registry.js';
 import fxFlowRouter from './routes/fxFlow.route.js';
+import sessionRouter from './routes/session.route.js';
 
 // ── Register MCP Tools ────────────────────────────────────────────────────────
 import { GoogleFxFlowTool } from './tools/googleFxFlow.js';
@@ -23,9 +23,10 @@ const app = express();
 // Middleware: CORS & Static Files
 app.use(cors());
 app.use('/downloads', express.static(path.join(process.cwd(), 'downloads')));
+app.use(express.static(path.join(process.cwd(), 'public')));
 
 // Middleware: JSON body parser
-app.use(express.json({ limit: '10kb' }));
+app.use(express.json({ limit: '2mb' }));
 
 // Middleware: Request ID
 app.use((req, _res, next) => {
@@ -51,6 +52,11 @@ app.use('/api/', limiter);
 
 // ── Routes ────────────────────────────────────────────────────────────────────
 
+// Login & Session Manager UI Page
+app.get(['/login', '/setup-session'], (_req, res) => {
+    res.sendFile(path.join(process.cwd(), 'public', 'login.html'));
+});
+
 // Health check
 app.get('/health', (_req, res) => {
     res.json({
@@ -61,8 +67,9 @@ app.get('/health', (_req, res) => {
     });
 });
 
-// Primary API route for Google FX Flow Video & Image Generator
+// Primary API routes
 app.use('/api/fx-flow', fxFlowRouter);
+app.use('/api/session', sessionRouter);
 
 // 404 handler
 app.use((_req, res) => {
@@ -84,6 +91,7 @@ async function startServer() {
             logger.info(`🚀 Google FX Flow Automation Server running on http://localhost:${config.port}`);
             logger.info(`📋 Registered tools: ${registry.getToolNames().join(', ')}`);
             logger.info(`🩺 Health: http://localhost:${config.port}/health`);
+            logger.info(`🔑 Login Page: http://localhost:${config.port}/login`);
             logger.info(`📡 API Generate: POST http://localhost:${config.port}/api/fx-flow/generate`);
             logger.info(`📡 API Status:   GET  http://localhost:${config.port}/api/fx-flow/status/:itemId`);
         });
@@ -96,3 +104,4 @@ async function startServer() {
 startServer();
 
 export default app;
+

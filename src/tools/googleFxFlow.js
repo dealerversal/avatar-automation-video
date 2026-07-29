@@ -90,7 +90,6 @@ export class GoogleFxFlowTool extends BaseTool {
             console.log(`\n[GoogleFX] 🚀 Launching persistent browser context from: ${profileDir}`);
             sharedContext = await chromium.launchPersistentContext(profileDir, {
                 headless: config.browser.headless,
-                channel: 'chrome',
                 slowMo: config.browser.slowMo,
                 args: [
                     '--start-maximized',

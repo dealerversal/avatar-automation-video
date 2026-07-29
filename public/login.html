@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Google FX Flow — VPS Session Setup</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-dark: #0b0f19;
+            --card-bg: rgba(17, 24, 39, 0.75);
+            --card-border: rgba(255, 255, 255, 0.08);
+            --accent-blue: #3b82f6;
+            --accent-purple: #8b5cf6;
+            --accent-emerald: #10b981;
+            --accent-rose: #f43f5e;
+            --text-main: #f3f4f6;
+            --text-muted: #9ca3af;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Outfit', -apple-system, BlinkMacSystemFont, sans-serif;
+            background-color: var(--bg-dark);
+            background-image: 
+                radial-gradient(at 0% 0%, rgba(59, 130, 246, 0.12) 0px, transparent 50%),
+                radial-gradient(at 100% 100%, rgba(139, 92, 246, 0.12) 0px, transparent 50%);
+            color: var(--text-main);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 2rem 1rem;
+        }
+
+        .container {
+            width: 100%;
+            max-width: 800px;
+            background: var(--card-bg);
+            backdrop-filter: blur(16px);
+            border: 1px solid var(--card-border);
+            border-radius: 24px;
+            padding: 2.5rem;
+            box-shadow: 0 20px 50px rgba(0, 0, 0, 0.5);
+        }
+
+        .header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 2rem;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+            padding-bottom: 1.5rem;
+        }
+
+        .title-group h1 {
+            font-size: 1.75rem;
+            font-weight: 700;
+            background: linear-gradient(135deg, #60a5fa, #c084fc);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .title-group p {
+            color: var(--text-muted);
+            font-size: 0.95rem;
+            margin-top: 4px;
+        }
+
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 16px;
+            border-radius: 9999px;
+            font-size: 0.85rem;
+            font-weight: 600;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background-color: var(--text-muted);
+        }
+
+        .status-dot.active {
+            background-color: var(--accent-emerald);
+            box-shadow: 0 0 10px var(--accent-emerald);
+        }
+
+        .status-dot.inactive {
+            background-color: var(--accent-rose);
+            box-shadow: 0 0 10px var(--accent-rose);
+        }
+
+        .status-dot.loading {
+            background-color: #f59e0b;
+            animation: pulse 1.5s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.3; }
+        }
+
+        .card-section {
+            margin-bottom: 2rem;
+        }
+
+        .section-title {
+            font-size: 1.1rem;
+            font-weight: 600;
+            margin-bottom: 1rem;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            color: #e5e7eb;
+        }
+
+        .tabs {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 1rem;
+            background: rgba(0, 0, 0, 0.3);
+            padding: 6px;
+            border-radius: 12px;
+        }
+
+        .tab-btn {
+            flex: 1;
+            padding: 10px 14px;
+            border: none;
+            background: transparent;
+            color: var(--text-muted);
+            font-family: inherit;
+            font-size: 0.9rem;
+            font-weight: 500;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .tab-btn.active {
+            background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple));
+            color: #ffffff;
+            box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
+        }
+
+        textarea {
+            width: 100%;
+            height: 180px;
+            background: rgba(0, 0, 0, 0.4);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 14px;
+            padding: 1rem;
+            color: #60a5fa;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.85rem;
+            resize: vertical;
+            transition: border-color 0.2s ease;
+        }
+
+        textarea:focus {
+            outline: none;
+            border-color: var(--accent-blue);
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.2);
+        }
+
+        .btn-group {
+            display: flex;
+            gap: 12px;
+            margin-top: 1.25rem;
+        }
+
+        .btn {
+            flex: 1;
+            padding: 14px 20px;
+            border: none;
+            border-radius: 12px;
+            font-family: inherit;
+            font-size: 0.95rem;
+            font-weight: 600;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            transition: all 0.2s ease;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #2563eb, #7c3aed);
+            color: #ffffff;
+            box-shadow: 0 4px 14px rgba(37, 99, 235, 0.4);
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(37, 99, 235, 0.6);
+        }
+
+        .btn-secondary {
+            background: rgba(255, 255, 255, 0.08);
+            color: var(--text-main);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .btn-secondary:hover {
+            background: rgba(255, 255, 255, 0.15);
+        }
+
+        .btn-danger {
+            background: rgba(244, 63, 94, 0.15);
+            color: #fda4af;
+            border: 1px solid rgba(244, 63, 94, 0.3);
+        }
+
+        .btn-danger:hover {
+            background: rgba(244, 63, 94, 0.25);
+        }
+
+        .instructions {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px dashed rgba(255, 255, 255, 0.1);
+            border-radius: 14px;
+            padding: 1.25rem;
+            font-size: 0.9rem;
+            color: var(--text-muted);
+            line-height: 1.6;
+        }
+
+        .instructions ol {
+            padding-left: 1.25rem;
+            margin-top: 0.5rem;
+        }
+
+        .instructions li {
+            margin-bottom: 0.4rem;
+        }
+
+        .log-box {
+            margin-top: 1.5rem;
+            padding: 1rem;
+            background: #050811;
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            border-radius: 12px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.85rem;
+            color: #a7f3d0;
+            display: none;
+            max-height: 150px;
+            overflow-y: auto;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="title-group">
+                <h1>🌐 Google FX Flow Session Manager</h1>
+                <p>VPS Browser Profile & Authentication Sync</p>
+            </div>
+            <div class="status-badge" id="statusBadge">
+                <span class="status-dot loading" id="statusDot"></span>
+                <span id="statusText">Checking Status...</span>
+            </div>
+        </div>
+
+        <div class="card-section">
+            <div class="section-title">
+                <span>🔑 Import Google Session Data</span>
+            </div>
+
+            <div class="tabs">
+                <button class="tab-btn active" onclick="setTab('cookies')">Cookie Header String</button>
+                <button class="tab-btn" onclick="setTab('json')">Playwright storageState JSON</button>
+            </div>
+
+            <textarea id="sessionInput" placeholder="Paste your Google Cookies or storageState JSON here...&#10;Example: __Secure-1PSID=...; __Secure-3PSID=...; SID=..."></textarea>
+
+            <div class="btn-group">
+                <button class="btn btn-primary" onclick="saveSession()" id="saveBtn">
+                    ✨ Save & Connect Session
+                </button>
+                <button class="btn btn-secondary" onclick="checkStatus()" id="checkBtn">
+                    🔄 Verify Auth Status
+                </button>
+                <button class="btn btn-danger" onclick="clearProfile()" id="clearBtn">
+                    🗑️ Reset Profile
+                </button>
+            </div>
+
+            <div class="log-box" id="logBox"></div>
+        </div>
+
+        <div class="instructions">
+            <div style="font-weight: 600; color: #fff; margin-bottom: 6px;">💡 How to get your Google Cookies in 10 seconds:</div>
+            <ol>
+                <li>Open <a href="https://labs.google/fx/tools/flow" target="_blank" style="color: #60a5fa;">labs.google/fx/tools/flow</a> in your desktop browser while logged in with your Google account.</li>
+                <li>Open Chrome DevTools (Press <code>F12</code> or <code>Cmd + Option + I</code>) → Go to <strong>Network</strong> tab.</li>
+                <li>Refresh the page, click on any network request to <code>labs.google</code>, right-click → <strong>Copy</strong> → <strong>Copy request headers</strong> or copy the <code>Cookie:</code> value.</li>
+                <li>Paste it in the box above and click <strong>Save & Connect Session</strong>!</li>
+            </ol>
+        </div>
+    </div>
+
+    <script>
+        let currentTab = 'cookies';
+
+        function setTab(tab) {
+            currentTab = tab;
+            document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+            event.target.classList.add('active');
+
+            const input = document.getElementById('sessionInput');
+            if (tab === 'cookies') {
+                input.placeholder = 'Paste your Cookie Header string here...\nExample: __Secure-1PSID=...; __Secure-3PSID=...; SID=...';
+            } else {
+                input.placeholder = 'Paste Playwright storageState JSON object here...\nExample: { "cookies": [...], "origins": [...] }';
+            }
+        }
+
+        function showLog(msg, type = 'info') {
+            const box = document.getElementById('logBox');
+            box.style.display = 'block';
+            const color = type === 'error' ? '#f87171' : type === 'success' ? '#34d399' : '#a7f3d0';
+            box.innerHTML += `<div style="color: ${color};">[${new Date().toLocaleTimeString()}] ${msg}</div>`;
+            box.scrollTop = box.scrollHeight;
+        }
+
+        async function checkStatus() {
+            const dot = document.getElementById('statusDot');
+            const text = document.getElementById('statusText');
+            dot.className = 'status-dot loading';
+            text.innerText = 'Verifying VPS Profile...';
+
+            try {
+                const res = await fetch('/api/session/status');
+                const data = await res.json();
+
+                if (data.authenticated) {
+                    dot.className = 'status-dot active';
+                    text.innerText = 'Connected & Authenticated';
+                    showLog(`✅ Session Active: Authenticated with Google FX Flow! (${data.cookieCount} cookies stored)`, 'success');
+                } else {
+                    dot.className = 'status-dot inactive';
+                    text.innerText = 'Not Authenticated';
+                    showLog(`⚠️ Session Inactive: ${data.message}`, 'error');
+                }
+            } catch (err) {
+                dot.className = 'status-dot inactive';
+                text.innerText = 'Connection Error';
+                showLog(`❌ Network error: ${err.message}`, 'error');
+            }
+        }
+
+        async function saveSession() {
+            const inputVal = document.getElementById('sessionInput').value.trim();
+            if (!inputVal) {
+                alert('Please paste your cookies or storageState JSON first!');
+                return;
+            }
+
+            const btn = document.getElementById('saveBtn');
+            btn.disabled = true;
+            btn.innerText = '⏳ Importing & Testing...';
+            showLog('🚀 Sending session data to VPS session manager...');
+
+            try {
+                let payload = {};
+                if (inputVal.startsWith('{') || inputVal.startsWith('[')) {
+                    payload = { storageState: JSON.parse(inputVal) };
+                } else {
+                    payload = { cookies: inputVal };
+                }
+
+                const res = await fetch('/api/session/import', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                });
+
+                const data = await res.json();
+                if (data.success) {
+                    showLog(`✅ ${data.message} (${data.cookiesStored} cookies set)`, 'success');
+                    await checkStatus();
+                } else {
+                    showLog(`❌ Failed to save session: ${data.error}`, 'error');
+                }
+            } catch (err) {
+                showLog(`❌ Error: ${err.message}`, 'error');
+            } finally {
+                btn.disabled = false;
+                btn.innerText = '✨ Save & Connect Session';
+            }
+        }
+
+        async function clearProfile() {
+            if (!confirm('Are you sure you want to clear the browser profile on VPS?')) return;
+            try {
+                const res = await fetch('/api/session/clear', { method: 'POST' });
+                const data = await res.json();
+                showLog(data.message, 'success');
+                await checkStatus();
+            } catch (err) {
+                showLog(`❌ Error: ${err.message}`, 'error');
+            }
+        }
+
+        // Run status check on page load
+        checkStatus();
+    </script>
+</body>
+</html>

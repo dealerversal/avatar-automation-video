@@ -51,7 +51,7 @@ jobs:
           echo "Syncing files using rsync..."
           rsync -ah --no-o --no-g --no-perms --omit-dir-times \
           -e "ssh -S ~/.ssh/control_socket" \
-          --exclude='.git' --exclude='.github' --exclude='node_modules' \
+          --exclude='.git' --exclude='.github' --exclude='node_modules' --exclude='browser-profile' --exclude='logs' \
           ./ ${{ env.USER }}@${{ env.HOST }}:${{ env.PROJECT_PATH }}
 
           echo "Running remote deployment commands..."
