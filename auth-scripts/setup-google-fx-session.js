@@ -101,12 +101,31 @@ async function runSetup() {
         console.log('🧹 Optimized browser profile (purged media caches while preserving auth tokens).');
     } catch (e) {}
 
+    // Automatically create browser-profile.zip
+    const projectRoot = path.resolve(__dirname, '..');
+    const zipPath = path.join(projectRoot, 'browser-profile.zip');
+    
+    if (fs.existsSync(zipPath)) {
+        try { fs.rmSync(zipPath, { force: true }); } catch (e) {}
+    }
+
+    console.log('\n📦 Automatically creating "browser-profile.zip"...');
+    try {
+        const { execSync } = await import('child_process');
+        execSync(`zip -q -r "${zipPath}" browser-profile`, { cwd: projectRoot });
+        const stats = fs.statSync(zipPath);
+        const mb = (stats.size / (1024 * 1024)).toFixed(2);
+        console.log(`✅ "browser-profile.zip" created successfully (${mb} MB)!`);
+    } catch (zipErr) {
+        console.warn(`⚠️ Could not auto-create zip file: ${zipErr.message}`);
+    }
+
     console.log('\n======================================================');
-    console.log('✅ GOOGLE FX FLOW SESSION SAVED SUCCESSFULLY!');
+    console.log('✅ GOOGLE FX FLOW SESSION SAVED & ZIPPED AUTOMATICALLY!');
     console.log('======================================================');
-    console.log('1. Zip your local "browser-profile" folder into "browser-profile.zip".');
-    console.log('2. Go to https://gen.socialversal.online/login');
-    console.log('3. Upload "browser-profile.zip" to sync with VPS!');
+    console.log(`1. "browser-profile.zip" is created in project root.`);
+    console.log('2. Open https://gen.socialversal.online/login');
+    console.log('3. Select "browser-profile.zip" to upload & sync with VPS!');
     console.log('======================================================\n');
 
     process.exit(0);
