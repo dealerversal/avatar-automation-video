@@ -26,7 +26,7 @@
 
     <div class="w-full max-w-2xl bg-white border border-slate-200 rounded-2xl p-4 sm:p-8">
         
-        <!-- Header (Responsive Stack on Mobile) -->
+        <!-- Main Header -->
         <div class="flex flex-col sm:flex-row sm:items-center justify-between pb-5 sm:pb-6 border-b border-slate-100 gap-3 sm:gap-4">
             <div class="flex items-center gap-3">
                 <div class="w-10 h-10 rounded-xl bg-slate-900 flex items-center justify-center text-white font-bold text-base shrink-0">
@@ -57,8 +57,17 @@
             <div class="h-10 bg-slate-200 rounded-xl w-full"></div>
         </div>
 
-        <!-- 2. SECTION A: Connected State (Shown ONLY when connected & authenticated) -->
+        <!-- 2. SECTION A: Connected State -->
         <div id="connectedState" class="hidden mt-6">
+            <div class="flex items-center justify-between mb-3">
+                <h2 class="text-sm font-semibold text-slate-800 flex items-center gap-2">
+                    <svg class="w-4 h-4 text-emerald-600 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                    </svg>
+                    <span>Connected Google Session</span>
+                </h2>
+            </div>
+
             <div class="bg-slate-50 border border-slate-200 rounded-xl p-4 sm:p-5 mb-5">
                 <div class="flex items-start sm:items-center gap-3.5">
                     <div id="userAvatarContainer" class="w-10 sm:w-12 h-10 sm:h-12 rounded-full bg-emerald-100 border border-emerald-200 text-emerald-800 flex items-center justify-center shrink-0 overflow-hidden font-bold text-sm sm:text-base">
@@ -101,21 +110,24 @@
             </div>
         </div>
 
-        <!-- 3. SECTION B: Form Section (Shown ONLY when form is open, hides SECTION A) -->
+        <!-- 3. SECTION B: Form Section (Title header with Back button & SVG icon) -->
         <div id="formSection" class="hidden mt-6">
-            <div class="flex flex-wrap items-center justify-between gap-2 mb-3">
-                <label class="text-sm font-semibold text-slate-800 flex items-center gap-2">
+            <div class="flex items-center justify-between gap-3 mb-4">
+                <h2 class="text-sm font-semibold text-slate-800 flex items-center gap-2">
                     <svg class="w-4 h-4 text-slate-600 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"></path>
                     </svg>
                     <span>Import Google Session Data</span>
-                </label>
-                <button id="cancelFormBtn" onclick="cancelForm()" class="hidden text-xs text-slate-600 hover:text-slate-900 underline font-semibold shrink-0">
-                    ← Back to Connected Profile
+                </h2>
+                <button id="cancelFormBtn" onclick="cancelForm()" class="hidden py-1.5 px-3 bg-white hover:bg-slate-50 text-slate-700 font-semibold text-xs rounded-lg border border-slate-300 transition-colors flex items-center gap-1.5 shrink-0">
+                    <svg class="w-3.5 h-3.5 text-slate-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path>
+                    </svg>
+                    <span>Back to Profile</span>
                 </button>
             </div>
 
-            <!-- Tabs (Responsive flex wrap) -->
+            <!-- Tabs -->
             <div class="flex bg-slate-100 p-1 rounded-xl border border-slate-200 mb-4 gap-1">
                 <button id="tabCookies" onclick="setTab('cookies')" class="flex-1 py-2 px-2.5 text-xs font-semibold rounded-lg text-slate-800 bg-white border border-slate-300 transition-all text-center">
                     Cookie Header String
@@ -130,7 +142,7 @@
                 class="w-full bg-slate-50 border border-slate-200 rounded-xl p-3.5 text-xs font-mono text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-400 focus:bg-white transition-all"
                 placeholder="Paste your Google Cookies here...&#10;Example: __Secure-1PSID=...; __Secure-3PSID=...; SID=..."></textarea>
 
-            <!-- Buttons (Stacked on mobile, 3-col on desktop) -->
+            <!-- Buttons -->
             <div class="grid grid-cols-1 sm:grid-cols-3 gap-2.5 mt-4">
                 <button onclick="saveSession()" id="saveBtn" 
                     class="sm:col-span-1 py-2.5 px-4 bg-white hover:bg-slate-50 text-slate-700 font-semibold text-xs rounded-xl border border-slate-300 transition-colors flex items-center justify-center gap-2">
