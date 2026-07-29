@@ -1,0 +1,28 @@
+{
+  "name": "google-fx-flow-automation",
+  "version": "1.0.0",
+  "description": "Browser automation system for Google FX Flow (labs.google/fx/tools/flow)",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "setup": "node scripts/setup-google-fx-session.js",
+    "setup-fx": "node scripts/setup-google-fx-session.js",
+    "test": "node scripts/test-google-fx.js",
+    "test-fx": "node scripts/test-google-fx.js"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1097.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.5.0",
+    "joi": "^17.13.3",
+    "mongodb": "^7.5.0",
+    "openai": "^4.86.0",
+    "playwright": "^1.50.1",
+    "uuid": "^11.1.0",
+    "winston": "^3.17.0"
+  }
+}

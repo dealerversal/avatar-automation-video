@@ -1,0 +1,85 @@
+name: Deploy Gen AI Browser VPS
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-gen-ai-browser
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      HOST: 72.60.118.141
+      USER: root
+      PROJECT_PATH: /root/projects/gen-ai-browser
+      PROCESS_NAME: gen.socialversal.online
+
+    steps:
+      - name: Set up SSH keys
+        uses: webfactory/ssh-agent@v0.5.0
+        with:
+          ssh-private-key: ${{ secrets.SERVER_PRIVATE_KEY }}
+
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Create .env file
+        run: |
+          echo "${{ secrets.ENV_FILE }}" > .env
+          echo "Verified .env file contents (keys only for security):"
+          grep -v '^#' .env | grep '=' | cut -d= -f1
+
+      - name: Deploy to VPS
+        run: |
+          mkdir -p ~/.ssh
+          
+          # Setup SSH ControlMaster for multiplexing (reuses a single TCP connection)
+          echo "Establishing SSH Master connection..."
+          ssh -M -S ~/.ssh/control_socket -fnN -o StrictHostKeyChecking=no ${{ env.USER }}@${{ env.HOST }}
+          
+          # Setup exit trap to close the multiplexed socket when the job completes
+          trap 'echo "Closing SSH Master connection..."; ssh -S ~/.ssh/control_socket -O exit ${{ env.USER }}@${{ env.HOST }} 2>/dev/null || true' EXIT
+
+          echo "Creating project directory..."
+          ssh -S ~/.ssh/control_socket ${{ env.USER }}@${{ env.HOST }} "mkdir -p ${{ env.PROJECT_PATH }}"
+
+          echo "Syncing files using rsync..."
+          rsync -ah --no-o --no-g --no-perms --omit-dir-times \
+          -e "ssh -S ~/.ssh/control_socket" \
+          --exclude='.git' --exclude='.github' --exclude='node_modules' \
+          ./ ${{ env.USER }}@${{ env.HOST }}:${{ env.PROJECT_PATH }}
+
+          echo "Running remote deployment commands..."
+          ssh -S ~/.ssh/control_socket ${{ env.USER }}@${{ env.HOST }} "
+            set -e
+            # Install Node.js if not already installed
+            if ! command -v node &> /dev/null; then
+              curl -fsSL https://deb.nodesource.com/setup_18.x | bash -
+              apt-get install -y nodejs
+            fi
+
+            # Install PM2 globally if not already installed
+            if ! command -v pm2 &> /dev/null; then
+              npm install -g pm2
+            fi
+
+            cd ${{ env.PROJECT_PATH }}
+            npm install --production
+
+            # Install Playwright browser dependencies if needed
+            npx playwright install chromium --with-deps || true
+
+            # Restart the application using ecosystem config
+            # We delete first to ensure a clean start with new config/env
+            if pm2 show ${{ env.PROCESS_NAME }} > /dev/null 2>&1; then
+              pm2 delete ${{ env.PROCESS_NAME }}
+            fi
+            pm2 start ecosystem.config.cjs --env production
+
+            pm2 save
+          "
