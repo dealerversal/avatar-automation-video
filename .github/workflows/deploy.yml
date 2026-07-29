@@ -1,4 +1,4 @@
-name: Deploy Gen AI Browser VPS Machine
+name: Deploy Gen AI Browser VPS Server
 
 on:
   push:
