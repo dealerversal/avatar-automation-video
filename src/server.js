@@ -20,6 +20,9 @@ registry.register(new GoogleFxFlowTool());
 // ── Express App ───────────────────────────────────────────────────────────────
 const app = express();
 
+// Enable trust proxy for Nginx reverse proxy
+app.set('trust proxy', 1);
+
 // Middleware: CORS & Static Files
 app.use(cors());
 app.use('/downloads', express.static(path.join(process.cwd(), 'downloads')));
