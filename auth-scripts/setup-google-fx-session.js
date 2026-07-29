@@ -81,6 +81,27 @@ async function runSetup() {
     console.log('\n💾 Saving session profile...');
     await context.close();
 
+    // Clean heavy non-essential caches to shrink zip file size (60MB -> 2MB)
+    try {
+        const cacheDirs = [
+            'Default/Cache',
+            'Default/Code Cache',
+            'Default/GPUCache',
+            'Default/Service Worker/CacheStorage',
+            'Default/Service Worker/ScriptCache',
+            'Default/DawnCache',
+            'GraphiteDawnCache',
+            'Crashpad',
+        ];
+        for (const dir of cacheDirs) {
+            const fullPath = path.join(profileDir, dir);
+            if (fs.existsSync(fullPath)) {
+                fs.rmSync(fullPath, { recursive: true, force: true });
+            }
+        }
+        console.log('🧹 Purged temporary browser caches (Profile optimized & lightweight).');
+    } catch (e) {}
+
     console.log('\n======================================================');
     console.log('✅ GOOGLE FX FLOW SESSION SAVED SUCCESSFULLY!');
     console.log('======================================================');
