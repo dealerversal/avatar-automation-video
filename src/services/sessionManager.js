@@ -336,11 +336,22 @@ export class SessionManager {
 
             const statusResult = await this.checkStatus();
 
+            // Trigger PM2 & Nginx reload asynchronously after 500ms
+            setTimeout(async () => {
+                try {
+                    const { exec } = await import('child_process');
+                    logger.info('[SessionManager] Reloading PM2 process & Nginx after browser profile upload...');
+                    exec('pm2 restart gen.socialversal.online && systemctl reload nginx', (err) => {
+                        if (err) logger.warn(`[SessionManager] PM2/Nginx reload note: ${err.message}`);
+                    });
+                } catch (e) {}
+            }, 500);
+
             return {
                 success: true,
                 ...statusResult,
                 message: statusResult.authenticated
-                    ? 'Browser profile uploaded, extracted, and authenticated successfully!'
+                    ? 'Browser profile uploaded, extracted, and server reloaded successfully!'
                     : 'Browser profile uploaded and extracted successfully!',
             };
         } catch (error) {
