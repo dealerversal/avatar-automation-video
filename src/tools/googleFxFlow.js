@@ -125,7 +125,6 @@ export class GoogleFxFlowTool extends BaseTool {
                 window.navigator.chrome = { runtime: {} };
                 Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
                 Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-            });
 
                 let currentHighlight = null;
                 let highlightTimer = null;
@@ -134,7 +133,6 @@ export class GoogleFxFlowTool extends BaseTool {
                 const highlight = (el) => {
                     if (!el || !(el instanceof HTMLElement)) return;
                     try {
-                        // Clear highlight from previous element immediately so only ONE element is highlighted
                         if (currentHighlight && currentHighlight !== el) {
                             try {
                                 currentHighlight.style.outline = currentHighlight._origOutline || '';
@@ -145,7 +143,6 @@ export class GoogleFxFlowTool extends BaseTool {
 
                         if (highlightTimer) clearTimeout(highlightTimer);
 
-                        // Save original style properties
                         if (el._origOutline === undefined) {
                             el._origOutline = el.style.outline;
                             el._origBoxShadow = el.style.boxShadow;
@@ -182,6 +179,10 @@ export class GoogleFxFlowTool extends BaseTool {
                 }, true);
             });
             console.log(`[GoogleFX] ✅ Singleton browser context ready (visual element highlighting enabled).`);
+        } catch (err) {
+            console.error(`[GoogleFX] ❌ Failed to launch browser context: ${err.message}`);
+            sharedContext = null;
+            throw err;
         } finally {
             isInitializing = false;
         }
