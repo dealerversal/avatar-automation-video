@@ -1,6 +1,6 @@
 // src/tools/googleFxFlow.js
 import { chromium } from 'playwright';
-import { existsSync, mkdirSync, writeFileSync, unlinkSync } from 'fs';
+import { existsSync, mkdirSync, writeFileSync, unlinkSync, createWriteStream } from 'fs';
 import https from 'https';
 import http from 'http';
 import path from 'path';
@@ -55,6 +55,14 @@ export class GoogleFxFlowTool extends BaseTool {
                 settings: {
                     type: 'object',
                     description: 'Optional model and style settings (e.g. { model: "omni-flash", aspectRatio: "16:9" })',
+                },
+                mediaUrl: {
+                    type: 'string',
+                    description: 'Optional public URL of reference media (image, video, or audio) to upload into Google Flow prompt bar before generation',
+                },
+                imageUrl: {
+                    type: 'string',
+                    description: 'Optional public URL of reference media (legacy alias for mediaUrl)',
                 },
             },
             required: ['prompt'],
@@ -196,7 +204,8 @@ export class GoogleFxFlowTool extends BaseTool {
         return sharedContext;
     }
 
-    async execute({ itemId, prompt, type = 'video', settings = {} }) {
+    async execute({ itemId, prompt, type = 'video', settings = {}, mediaUrl = null, imageUrl = null }) {
+        const effectiveMediaUrl = mediaUrl || imageUrl || null;
         const execStart = Date.now();
         console.log('\n' + '─'.repeat(60));
         console.log('🌐  [GoogleFxFlowTool] BROWSER AUTOMATION STARTED');
@@ -205,6 +214,7 @@ export class GoogleFxFlowTool extends BaseTool {
         console.log(`🎬  Type   : ${type.toUpperCase()}`);
         console.log(`💬  Prompt : "${prompt.substring(0, 100)}${prompt.length > 100 ? '...' : ''}"`);
         console.log(`⚙️   Settings: ${JSON.stringify(settings)}`);
+        if (effectiveMediaUrl) console.log(`🖼️   Media URL: ${effectiveMediaUrl}`);
         logger.info(`[GoogleFxFlowTool] Executing (${type}) [${itemId}]: "${prompt.substring(0, 80)}..."`);
 
         console.log(`\n[1/5] 🚀 Getting shared browser context...`);
@@ -269,15 +279,53 @@ export class GoogleFxFlowTool extends BaseTool {
             console.log(`\n[4/6] ⚙️ Configuring generator mode (${type}) and settings...`);
             await this._applySettings(page, type, settings);
 
+            // 3b. Upload reference media if mediaUrl provided
+            let uploadedMediaUrls = [];
+            if (effectiveMediaUrl) {
+                console.log(`\n[4b/6] 🖼️ Uploading reference media from URL...`);
+                uploadedMediaUrls = await this._uploadMediaFromUrl(page, effectiveMediaUrl, itemId);
+                console.log(`      🔒 Uploaded media URLs captured for exclusion: ${uploadedMediaUrls.length}`);
+            }
 
-            // 4. Enter Prompt & Submit
+            // NOTE: _applyResultFilter() is intentionally NOT called here.
+            // Calling it right after upload would fire an Escape keypress that closes
+            // the upload panel while it is still transitioning → breaks the upload flow.
+            // The filter is applied inside _extractResult() before polling begins.
+
+            // 4. Wait for prompt bar to fully settle after upload, then snapshot ALL
+            // pre-existing media URLs. This must happen AFTER the media panel closes
+            // and the thumbnail is stable in the prompt bar.
+            // Any URL in this snapshot will be EXCLUDED from result polling.
+            // IMPORTANT: Increased wait to 5000ms — uploaded video URL may appear in DOM
+            // AFTER panel closes (Google streams/renders the uploaded thumbnail asynchronously).
+            await page.waitForTimeout(5000); // let prompt bar thumbnail + any lazy-loaded uploaded URLs settle
+            const preExistingUrls = await page.evaluate(() => {
+                const urls = new Set();
+                document.querySelectorAll('img[src], video[src], video source[src]').forEach(el => {
+                    const src = el.getAttribute('src') || '';
+                    if (src && !src.startsWith('data:')) urls.add(src);
+                });
+                // Also capture blob URLs and any src from prompt bar attachments
+                document.querySelectorAll('[src]').forEach(el => {
+                    const src = el.getAttribute('src') || '';
+                    if (src && (src.startsWith('blob:') || src.startsWith('http'))) urls.add(src);
+                });
+                return Array.from(urls);
+            });
+            console.log(`      📸 Pre-submit snapshot: ${preExistingUrls.length} existing media URLs captured (will be excluded from result)`);
+
+            // 5. Enter Prompt & Submit
             console.log(`\n[5/6] ⌨️ Submitting prompt into generation bar...`);
-            await this._submitPrompt(page, prompt);
+            const postSubmitUrls = await this._submitPrompt(page, prompt);
             console.log(`      ✅ Prompt submitted!`);
 
-            // 5. Poll and Extract Results & Download Local Asset
+            // Merge: preExisting + post-submit snapshot + explicitly captured uploaded URLs
+            const allExcludedUrls = Array.from(new Set([...preExistingUrls, ...(postSubmitUrls || []), ...uploadedMediaUrls]));
+            console.log(`      🔒 Total excluded reference media URLs: ${allExcludedUrls.length} (preExisting=${preExistingUrls.length}, postSubmit=${(postSubmitUrls||[]).length}, uploadedCapture=${uploadedMediaUrls.length})`);
+
+            // 6. Poll and Extract Results & Download Local Asset
             console.log(`\n[6/6] ⏳ Polling for ${type} generation completion, downloading asset & saving locally...`);
-            const result = await this._extractResult(page, type, itemId);
+            const result = await this._extractResult(page, type, itemId, allExcludedUrls);
 
             const totalMs = Date.now() - execStart;
             console.log('\n' + '─'.repeat(60));
@@ -1111,6 +1159,719 @@ export class GoogleFxFlowTool extends BaseTool {
         }
     }
 
+    /**
+     * Downloads reference media (image, video, or audio) from the given URL to a temp file,
+     * detecting its Content-Type header and file extension, then uploads it to
+     * Google Flow via the "+ Create → Upload media" native file-chooser flow.
+     */
+    async _uploadMediaFromUrl(page, mediaUrl, itemId = null) {
+        const downloadDir = path.join(process.cwd(), 'downloads');
+        if (!existsSync(downloadDir)) mkdirSync(downloadDir, { recursive: true });
+
+        // ── Step 1: Download media from URL & inspect headers / type ──────────
+        // Helper: detect mediaType + ext from contentType and URL path
+        const detectTypeAndExt = (contentType, targetUrl) => {
+            const urlObj = new URL(targetUrl);
+            const decodedPath = decodeURIComponent(urlObj.pathname);
+            const extMatch = decodedPath.match(/\.(mp4|mov|webm|avi|mkv|m4v|jpg|jpeg|png|webp|gif|bmp|mp3|wav|ogg|aac|flac|m4a)$/i);
+            let ext = '';
+            let mediaType = 'unknown';
+            const ct = (contentType || '').toLowerCase();
+
+            if (ct.startsWith('video/')) {
+                mediaType = 'video';
+                ext = extMatch ? extMatch[1].toLowerCase() : (ct.includes('webm') ? 'webm' : 'mp4');
+            } else if (ct.startsWith('image/')) {
+                mediaType = 'image';
+                ext = extMatch ? extMatch[1].toLowerCase() : (ct.includes('png') ? 'png' : ct.includes('webp') ? 'webp' : ct.includes('gif') ? 'gif' : 'jpg');
+            } else if (ct.startsWith('audio/')) {
+                mediaType = 'audio';
+                ext = extMatch ? extMatch[1].toLowerCase() : (ct.includes('wav') ? 'wav' : 'mp3');
+            } else if (extMatch) {
+                ext = extMatch[1].toLowerCase();
+                if (['mp4', 'mov', 'webm', 'avi', 'mkv', 'm4v'].includes(ext)) mediaType = 'video';
+                else if (['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp'].includes(ext)) mediaType = 'image';
+                else if (['mp3', 'wav', 'ogg', 'aac', 'flac', 'm4a'].includes(ext)) mediaType = 'audio';
+            } else {
+                mediaType = 'image';
+                ext = 'jpg';
+            }
+            return { mediaType, ext };
+        };
+
+        const fetchAndDetectMedia = async (targetUrl) => {
+            // NOTE: browser page.evaluate fetch() is intentionally SKIPPED.
+            // labs.google blocks CORS on external URLs — always throws "Failed to fetch".
+            // Playwright API context and Node.js http are CORS-free and more reliable.
+
+            // Tier 1: Playwright API context (Chromium network engine, no CORS restriction)
+            try {
+                console.log(`      🌐 Fetching media via Playwright API context...`);
+                const response = await page.request.get(targetUrl, {
+                    headers: {
+                        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                    },
+                    timeout: 45000,
+                });
+
+                if (response.ok()) {
+                    const headers = response.headers();
+                    const contentType = (headers['content-type'] || '').toLowerCase();
+                    const { mediaType, ext } = detectTypeAndExt(contentType, targetUrl);
+                    const tmpFilename = `upload_ref_${Date.now()}.${ext}`;
+                    const tmpPath = path.join(downloadDir, tmpFilename);
+                    const buffer = await response.body();
+                    writeFileSync(tmpPath, buffer);
+                    console.log(`      ✅ Downloaded via Playwright context [${mediaType.toUpperCase()}, .${ext}]`);
+                    return { tmpPath, mediaType, ext, contentType };
+                }
+            } catch (err) {
+                console.warn(`      ⚠️ Playwright page.request download failed (${err.message}), trying Node.js fallback...`);
+            }
+
+            // Tier 2: Node.js http/https fallback with standard Chrome headers
+            return new Promise((resolve, reject) => {
+                const downloadWithNode = (currentUrl, redirectDepth = 0) => {
+                    if (redirectDepth > 5) return reject(new Error('Too many redirects downloading media'));
+                    const urlObj = new URL(currentUrl);
+                    const proto = currentUrl.startsWith('https') ? https : http;
+
+                    const options = {
+                        hostname: urlObj.hostname,
+                        port: urlObj.port || (currentUrl.startsWith('https') ? 443 : 80),
+                        path: urlObj.pathname + urlObj.search,
+                        method: 'GET',
+                        headers: {
+                            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+                            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                        },
+                    };
+
+                    const req = proto.request(options, (res) => {
+                        if ([301, 302, 307, 308].includes(res.statusCode) && res.headers.location) {
+                            const redirectUrl = new URL(res.headers.location, currentUrl).toString();
+                            return downloadWithNode(redirectUrl, redirectDepth + 1);
+                        }
+
+                        if (res.statusCode !== 200) {
+                            return reject(new Error(`Failed to download media URL, HTTP ${res.statusCode}`));
+                        }
+
+                        const contentType = (res.headers['content-type'] || '').toLowerCase();
+                        const { mediaType, ext } = detectTypeAndExt(contentType, currentUrl);
+                        const tmpFilename = `upload_ref_${Date.now()}.${ext}`;
+                        const tmpPath = path.join(downloadDir, tmpFilename);
+                        console.log(`      ✅ Downloaded via Node.js http [${mediaType.toUpperCase()}, .${ext}]`);
+                        const fileStream = createWriteStream(tmpPath);
+
+                        res.pipe(fileStream);
+                        fileStream.on('finish', () => { fileStream.close(); resolve({ tmpPath, mediaType, ext, contentType }); });
+                        fileStream.on('error', reject);
+                    });
+
+                    req.on('error', reject);
+                    req.end();
+                };
+
+                downloadWithNode(targetUrl);
+            });
+        };
+
+        const mediaInfo = await fetchAndDetectMedia(mediaUrl);
+        const { tmpPath, mediaType, ext, contentType } = mediaInfo;
+
+        console.log(`      ⬇️ Downloaded reference ${mediaType.toUpperCase()} [MIME: ${contentType || 'n/a'}, Ext: .${ext}]: ${mediaUrl}`);
+        console.log(`      ✅ Media saved to temp file: ${tmpPath}`);
+
+        // ── Step 2: Click "+ Create" button to open the All Media panel ──────
+        console.log(`      📂 Opening media panel via "+Create" button...`);
+        let createBtnClicked = false;
+
+        // Check if media panel is ALREADY open first
+        const isPanelAlreadyOpen = await page.evaluate(() => {
+            const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+            return Array.from(document.querySelectorAll('button, [role="button"]')).some(b => {
+                if (!isVisible(b)) return false;
+                const txt = (b.innerText || b.textContent || '').toLowerCase();
+                return txt.includes('upload media') || txt.includes('upload');
+            });
+        });
+
+        if (isPanelAlreadyOpen) {
+            console.log(`      ✅ Media panel was already open!`);
+            createBtnClicked = true;
+        } else {
+            for (let attempt = 1; attempt <= 5; attempt++) {
+                const coords = await page.evaluate(() => {
+                    const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+
+                    // Strategy 1: Find prompt input element, get prompt bar container, pick the + button next to input
+                    const inputEl = Array.from(document.querySelectorAll('textarea, input, [contenteditable]')).find(el => {
+                        if (!isVisible(el)) return false;
+                        const ph = (el.getAttribute('placeholder') || '').toLowerCase();
+                        return ph.includes('create') || ph.includes('want') || ph.includes('prompt') || el.tagName.toLowerCase() === 'textarea';
+                    });
+
+                    let btn = null;
+                    if (inputEl) {
+                        let parent = inputEl.parentElement;
+                        for (let i = 0; i < 6 && parent; i++) {
+                            const btns = Array.from(parent.querySelectorAll('button, [role="button"]')).filter(b => {
+                                if (!isVisible(b)) return false;
+                                const txt = (b.innerText || b.textContent || '').toLowerCase();
+                                return !txt.includes('agent instructions') && !txt.includes('settings') && !txt.includes('expand');
+                            });
+                            if (btns.length >= 1) {
+                                btn = btns[0]; // Leftmost button in prompt bar is the + button!
+                                break;
+                            }
+                            parent = parent.parentElement;
+                        }
+                    }
+
+                    // Strategy 2: Search for button containing add / add_2 icon
+                    if (!btn) {
+                        const allBtns = Array.from(document.querySelectorAll('button, [role="button"]'));
+                        btn = allBtns.find(b => {
+                            if (!isVisible(b)) return false;
+                            const txt = (b.innerText || b.textContent || '').trim();
+                            const icons = Array.from(b.querySelectorAll('i, span, [class*="google-symbols"], [class*="material-icons"]'));
+                            const hasAddIcon = icons.some(i => (i.textContent || '').trim().includes('add'));
+                            return hasAddIcon || txt.includes('add_2') || txt === '+ Create' || txt.includes('+');
+                        });
+                    }
+
+                    // Strategy 3: Find button at bottom area near prompt input (left < 450)
+                    if (!btn) {
+                        const allBtns = Array.from(document.querySelectorAll('button, [role="button"]'));
+                        btn = allBtns.find(b => {
+                            if (!isVisible(b)) return false;
+                            const r = b.getBoundingClientRect();
+                            return r.top > window.innerHeight - 200 && r.left < 450 && r.width < 100;
+                        });
+                    }
+
+                    if (btn) {
+                        if (window.__highlight) window.__highlight(btn);
+                        const r = btn.getBoundingClientRect();
+                        return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2) };
+                    }
+                    return null;
+                });
+
+                if (coords) {
+                    console.log(`      🖱️ Clicked "+Create" button at [${coords.cx}, ${coords.cy}] (attempt ${attempt}/5)...`);
+                    try { await page.mouse.click(coords.cx, coords.cy); } catch {}
+                    await page.waitForTimeout(1500);
+
+                    // Verify if media panel opened by checking for "Upload media" button
+                    const panelOpen = await page.evaluate(() => {
+                        const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+                        return Array.from(document.querySelectorAll('button, [role="button"]')).some(b => {
+                            if (!isVisible(b)) return false;
+                            const txt = (b.innerText || b.textContent || '').toLowerCase();
+                            return txt.includes('upload media') || txt.includes('upload');
+                        });
+                    });
+
+                    if (panelOpen) {
+                        createBtnClicked = true;
+                        console.log(`      ✅ Media panel opened successfully!`);
+                        break;
+                    }
+                } else {
+                    console.warn(`      ⚠️ "+Create" button not found (attempt ${attempt}/5)...`);
+                    await page.waitForTimeout(1000);
+                }
+            }
+        }
+
+        if (!createBtnClicked) {
+            try { if (existsSync(tmpPath)) unlinkSync(tmpPath); } catch {}
+            throw new Error(`[GoogleFX] ❌ Could not find or click "+Create" button to open media panel. Media upload failed.`);
+        }
+
+        await page.waitForTimeout(1000);
+
+        // ── Step 3: Click "Upload media" button via filechooser event ─────────
+        console.log(`      📤 Triggering Upload media file chooser...`);
+        let uploaded = false;
+        for (let attempt = 1; attempt <= 3; attempt++) {
+            try {
+                // Find the Upload media button
+                const uploadBtnCoords = await page.evaluate(() => {
+                    const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+                    const allBtns = Array.from(document.querySelectorAll('button'));
+                    const uploadBtn = allBtns.find(b => {
+                        if (!isVisible(b)) return false;
+                        const txt = (b.innerText || b.textContent || '').toLowerCase();
+                        const icons = Array.from(b.querySelectorAll('i, [class*="google-symbols"]'));
+                        const hasUploadIcon = icons.some(i => (i.textContent || '').trim() === 'upload');
+                        return hasUploadIcon || txt.includes('upload media') || txt === 'upload';
+                    });
+                    if (uploadBtn) {
+                        if (window.__highlight) window.__highlight(uploadBtn);
+                        uploadBtn.scrollIntoView({ block: 'center' });
+                        const r = uploadBtn.getBoundingClientRect();
+                        return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2) };
+                    }
+                    return null;
+                });
+
+                if (!uploadBtnCoords) {
+                    console.warn(`      ⚠️ Upload media button not found (attempt ${attempt}/3)`);
+                    await page.waitForTimeout(1000);
+                    continue;
+                }
+
+                console.log(`      🖱️ Clicking Upload media at [${uploadBtnCoords.cx}, ${uploadBtnCoords.cy}] (attempt ${attempt})...`);
+
+                // Wait for file chooser and click simultaneously
+                const [fileChooser] = await Promise.all([
+                    page.waitForEvent('filechooser', { timeout: 8000 }),
+                    page.mouse.click(uploadBtnCoords.cx, uploadBtnCoords.cy),
+                ]);
+
+                console.log(`      📁 File chooser opened — setting file: ${tmpPath}`);
+                await fileChooser.setFiles(tmpPath);
+                console.log(`      ✅ File set in chooser successfully!`);
+
+                // ── Step 1: Handle "Rights to use this video" dialog ─────────────────
+                console.log(`      🔍 Checking for "Rights to use this video" dialog...`);
+                await page.waitForTimeout(1500);
+                const rightsDialogHandled = await page.evaluate(() => {
+                    const bodyText = (document.body && document.body.innerText) || '';
+                    const hasRightsDialog = bodyText.includes('Rights to use this video') ||
+                                           bodyText.includes('rights to use') ||
+                                           bodyText.includes('responsible video');
+
+                    if (!hasRightsDialog) return { found: false };
+
+                    const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+                    const allBtns = Array.from(document.querySelectorAll('button'));
+
+                    const confirmBtn = allBtns.find(b => {
+                        if (!isVisible(b)) return false;
+                        const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
+                        if (txt === 'i understand' || txt === 'i agree' || txt === 'got it' ||
+                            txt === 'continue' || txt === 'ok' || txt === 'accept' ||
+                            txt === 'confirm' || txt === 'agree') return true;
+                        if (txt === 'close' || txt === 'cancel') return false;
+                        return false;
+                    });
+
+                    if (confirmBtn) {
+                        confirmBtn.scrollIntoView({ block: 'center' });
+                        confirmBtn.click();
+                        return { found: true, clicked: (confirmBtn.innerText || confirmBtn.textContent || '').trim() };
+                    }
+
+                    const dialogContainers = document.querySelectorAll('[role="dialog"], [class*="dialog"], [class*="modal"]');
+                    for (const container of dialogContainers) {
+                        if (!(container.innerText || '').includes('Rights to use')) continue;
+                        const btns = Array.from(container.querySelectorAll('button')).filter(b => {
+                            if (!isVisible(b)) return false;
+                            const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
+                            return txt !== 'close' && txt !== 'cancel' && txt !== '✕' && txt !== 'x';
+                        });
+                        if (btns.length > 0) {
+                            const r = btns[0].getBoundingClientRect();
+                            return {
+                                found: true, needsMouse: true,
+                                cx: Math.round(r.left + r.width / 2),
+                                cy: Math.round(r.top + r.height / 2),
+                                text: (btns[0].innerText || btns[0].textContent || '').trim()
+                            };
+                        }
+                    }
+                    return { found: true, clicked: null, noBtn: true };
+                });
+
+                if (rightsDialogHandled.found) {
+                    if (rightsDialogHandled.needsMouse) {
+                        console.log(`      ⚠️ Rights dialog: clicking via mouse [${rightsDialogHandled.cx}, ${rightsDialogHandled.cy}] — "${rightsDialogHandled.text}"`);
+                        await page.mouse.click(rightsDialogHandled.cx, rightsDialogHandled.cy);
+                    } else if (rightsDialogHandled.clicked) {
+                        console.log(`      ✅ Rights dialog handled — clicked: "${rightsDialogHandled.clicked}"`);
+                    } else {
+                        console.warn(`      ⚠️ Rights dialog found but no confirm button — pressing Escape`);
+                        await page.keyboard.press('Escape');
+                    }
+                    await page.waitForTimeout(1000);
+                } else {
+                    console.log(`      ℹ️ No "Rights to use this video" dialog`);
+                }
+
+                // ── Step 2: Handle "Trim to upload" dialog ───────────────────────────
+                console.log(`      🔍 Checking for "Trim to upload" dialog...`);
+                await page.waitForTimeout(2000);
+                const trimDialogHandled = await page.evaluate(() => {
+                    const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+                    const allBtns = Array.from(document.querySelectorAll('button'));
+
+                    const trimBtn = allBtns.find(b => {
+                        if (!isVisible(b)) return false;
+                        const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
+                        return txt === 'trim & upload' || txt.includes('trim & upload') || txt.includes('trim and upload');
+                    });
+
+                    if (trimBtn) {
+                        trimBtn.scrollIntoView({ block: 'center' });
+                        trimBtn.click();
+                        return { found: true, text: (trimBtn.innerText || trimBtn.textContent || '').trim() };
+                    }
+
+                    const hasTrimDialog = (document.body.innerText || '').includes('Trim to upload');
+                    return { found: false, hasTrimDialog };
+                });
+
+                if (trimDialogHandled.found) {
+                    console.log(`      ✅ "Trim & upload" clicked — "${trimDialogHandled.text}"`);
+                    await page.waitForTimeout(2000);
+                } else if (trimDialogHandled.hasTrimDialog) {
+                    console.log(`      ⚠️ Trim dialog found but button not clicked via DOM — trying mouse...`);
+                    const trimBtnCoords = await page.evaluate(() => {
+                        const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+                        const btn = Array.from(document.querySelectorAll('button')).find(b => {
+                            if (!isVisible(b)) return false;
+                            const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
+                            return txt.includes('trim') && !txt.includes('close');
+                        });
+                        if (btn) {
+                            const r = btn.getBoundingClientRect();
+                            return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2) };
+                        }
+                        return null;
+                    });
+                    if (trimBtnCoords) {
+                        await page.mouse.click(trimBtnCoords.cx, trimBtnCoords.cy);
+                        console.log(`      ✅ "Trim & upload" clicked via mouse at [${trimBtnCoords.cx}, ${trimBtnCoords.cy}]`);
+                        await page.waitForTimeout(2000);
+                    }
+                } else {
+                    console.log(`      ℹ️ No "Trim to upload" dialog — image file or dialog skipped`);
+                }
+
+                // ── Real-Time UI Upload & Processing Progress Tracking ─────────
+                console.log(`      ⏳ Real-Time UI Tracking: Monitoring file upload & cloud processing...`);
+                let uploadCompletedInUI = false;
+                const uploadStartTime = Date.now();
+                let lastActivityTime = Date.now();
+                let lastProgressPct = -1;
+                const maxStaleMs = 300000; // Allow up to 5 minutes of active progress
+
+                while (Date.now() - lastActivityTime < maxStaleMs) {
+                    const elapsedSec = Math.round((Date.now() - uploadStartTime) / 1000);
+
+                    // Read live UI progress indicators (Percentages, Progress bars, Status text, Add to Prompt)
+                    const uiProgress = await page.evaluate(() => {
+                        const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+                        const bodyText = document.body ? document.body.innerText || '' : '';
+
+                        // 1. Percentage tracking (e.g. 15%, 65%, 99%)
+                        const pctMatches = bodyText.match(/(\d{1,3})\s*%/g);
+                        let currentPct = null;
+                        if (pctMatches && pctMatches.length > 0) {
+                            for (const match of pctMatches) {
+                                const val = parseInt(match.replace('%', '').trim(), 10);
+                                if (val >= 0 && val <= 100) {
+                                    currentPct = val;
+                                    break;
+                                }
+                            }
+                        }
+
+                        // 2. Active progressbar / spinner / loading elements
+                        const hasActiveLoader = Array.from(document.querySelectorAll('[role="progressbar"], progress, [class*="progress"], [class*="spinner"], svg[class*="loading"], [class*="loader"]')).some(isVisible);
+
+                        // 3. Active processing status text
+                        const isProcessingText = bodyText.includes('Uploading') || bodyText.includes('uploading') ||
+                                                 bodyText.includes('Processing') || bodyText.includes('processing') ||
+                                                 bodyText.includes('Transcoding') || bodyText.includes('Saving');
+
+                        // 4. Prompt bar attachment verification
+                        const clearBtn = Array.from(document.querySelectorAll('button')).find(b => {
+                            if (!isVisible(b)) return false;
+                            const txt = (b.innerText || b.textContent || '').toLowerCase();
+                            const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+                            return txt.includes('clear prompt') || aria.includes('clear prompt') || aria.includes('remove asset');
+                        });
+
+                        // 5. Check "Add to Prompt" button
+                        const addToPromptBtn = Array.from(document.querySelectorAll('button')).find(b => {
+                            if (!isVisible(b)) return false;
+                            const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
+                            return txt === 'add to prompt' || txt.includes('add to prompt');
+                        });
+
+                        let addBtnCoords = null;
+                        if (addToPromptBtn && isVisible(addToPromptBtn)) {
+                            const isNativeDisabled = addToPromptBtn.disabled || addToPromptBtn.getAttribute('aria-disabled') === 'true';
+                            if (!isNativeDisabled) {
+                                addToPromptBtn.scrollIntoView({ block: 'center' });
+                                const r = addToPromptBtn.getBoundingClientRect();
+                                addBtnCoords = { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2) };
+                            }
+                        }
+
+                        const candidateAsset = Array.from(document.querySelectorAll('img[src], video[src], [class*="asset"], [class*="card"], [class*="thumbnail"]')).find(el => {
+                            if (!isVisible(el)) return false;
+                            const r = el.getBoundingClientRect();
+                            if (r.width < 25 || r.height < 25) return false;
+                            const src = el.getAttribute('src') || '';
+                            return !src.includes('googleusercontent') && !src.includes('gstatic') && !src.includes('avatar') && !src.includes('logo');
+                        });
+
+                        let assetCoords = null;
+                        if (candidateAsset) {
+                            const r = candidateAsset.getBoundingClientRect();
+                            assetCoords = { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2) };
+                        }
+
+                        return {
+                            currentPct,
+                            hasActiveLoader,
+                            isProcessingText,
+                            isAttached: !!clearBtn,
+                            hasAddBtn: !!addToPromptBtn,
+                            addBtnCoords,
+                            assetCoords,
+                        };
+                    });
+
+                    // Update activity timer if UI progress is actively changing/uploading
+                    if (uiProgress.currentPct !== null && uiProgress.currentPct !== lastProgressPct) {
+                        console.log(`      📊 Live UI Upload Progress: ${uiProgress.currentPct}% (${elapsedSec}s)`);
+                        lastProgressPct = uiProgress.currentPct;
+                        lastActivityTime = Date.now();
+
+                        if (itemId) {
+                            try {
+                                const jobsCol = getJobsCollection();
+                                await jobsCol.updateOne(
+                                    { itemId },
+                                    {
+                                        $set: {
+                                            progressPct: uiProgress.currentPct,
+                                            progressStatus: `Uploading reference media (${uiProgress.currentPct}%)...`,
+                                            updatedAt: new Date(),
+                                        }
+                                    }
+                                );
+                            } catch (e) {}
+                        }
+                    } else if (uiProgress.hasActiveLoader || uiProgress.isProcessingText) {
+                        lastActivityTime = Date.now();
+                    }
+
+                    if (uiProgress.isAttached) {
+                        console.log(`      ✅ Upload & attachment complete in UI! (${elapsedSec}s)`);
+                        uploadCompletedInUI = true;
+                        break;
+                    }
+
+                    // If uploaded video/image asset card is detected in UI, upload is DONE!
+                    if (uiProgress.assetCoords) {
+                        console.log(`      ✅ Uploaded video asset detected in UI! (${elapsedSec}s) — selecting asset & attaching to prompt...`);
+                        try { await page.mouse.click(uiProgress.assetCoords.cx, uiProgress.assetCoords.cy); } catch {}
+                        await page.waitForTimeout(800);
+
+                        if (uiProgress.addBtnCoords) {
+                            try { await page.mouse.click(uiProgress.addBtnCoords.cx, uiProgress.addBtnCoords.cy); } catch {}
+                            await page.waitForTimeout(1500);
+                        }
+
+                        uploadCompletedInUI = true;
+                        break;
+                    }
+
+                    if (uiProgress.addBtnCoords) {
+                        console.log(`      🖱️ Clicking enabled "Add to Prompt" button at [${uiProgress.addBtnCoords.cx}, ${uiProgress.addBtnCoords.cy}] (${elapsedSec}s)...`);
+                        try { await page.mouse.click(uiProgress.addBtnCoords.cx, uiProgress.addBtnCoords.cy); } catch {}
+                        await page.waitForTimeout(2000);
+                    } else if (!uiProgress.hasAddBtn) {
+                        const openCoords = await page.evaluate(() => {
+                            const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+                            const input = Array.from(document.querySelectorAll('textarea, input')).find(el => (el.getAttribute('placeholder') || '').toLowerCase().includes('create'));
+                            if (input) {
+                                let parent = input.parentElement;
+                                for (let i = 0; i < 6 && parent; i++) {
+                                    const btns = Array.from(parent.querySelectorAll('button')).filter(isVisible);
+                                    if (btns.length >= 1) {
+                                        const r = btns[0].getBoundingClientRect();
+                                        return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2) };
+                                    }
+                                    parent = parent.parentElement;
+                                }
+                            }
+                            return null;
+                        });
+                        if (openCoords) {
+                            console.log(`      📂 Opening media panel via + button (${elapsedSec}s)...`);
+                            try { await page.mouse.click(openCoords.cx, openCoords.cy); } catch {}
+                            await page.waitForTimeout(1500);
+                        }
+                    }
+
+                    await page.waitForTimeout(2000);
+                }
+
+                if (!uploadCompletedInUI) {
+                    try { if (existsSync(tmpPath)) unlinkSync(tmpPath); } catch {}
+                    throw new Error(`[GoogleFX] ❌ Media upload in UI did not complete or was interrupted.`);
+                }
+
+                uploaded = true;
+                break;
+
+            } catch (fcErr) {
+                console.warn(`      ⚠️ File chooser attempt ${attempt}/3 failed: ${fcErr.message}`);
+                await page.waitForTimeout(1500);
+            }
+        }
+
+        if (!uploaded) {
+            try { if (existsSync(tmpPath)) unlinkSync(tmpPath); } catch {}
+            throw new Error(`[GoogleFX] ❌ Media upload failed: file chooser was not triggered or file set failed after 3 attempts.`);
+        }
+
+
+        // ── CRITICAL: Verify attachment actually appeared in prompt bar ──────
+        console.log(`      🔍 Waiting for media attachment to appear in the prompt bar...`);
+        let attachmentVerified = false;
+
+        for (let round = 1; round <= 3 && !attachmentVerified; round++) {
+            if (round > 1) {
+                console.log(`      🔄 Round ${round}: Re-trying "Add to Prompt" click...`);
+                const retryCoords = await page.evaluate(() => {
+                    const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+                    const btn = Array.from(document.querySelectorAll('button')).find(b => {
+                        if (!isVisible(b)) return false;
+                        const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
+                        return txt === 'add to prompt' || txt.includes('add to prompt');
+                    });
+                    if (btn) {
+                        const r = btn.getBoundingClientRect();
+                        return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2) };
+                    }
+                    return null;
+                });
+                if (retryCoords) {
+                    await page.mouse.click(retryCoords.cx, retryCoords.cy);
+                    await page.waitForTimeout(1500);
+                }
+            }
+
+            for (let i = 0; i < 16 && !attachmentVerified; i++) {
+                attachmentVerified = await page.evaluate(() => {
+                    const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+
+                    const videos = Array.from(document.querySelectorAll('video'));
+                    for (const v of videos) {
+                        if (!isVisible(v)) continue;
+                        const src = v.getAttribute('src') || (v.querySelector('source') && v.querySelector('source').getAttribute('src')) || '';
+                        if (src.startsWith('blob:') || src.startsWith('http')) return true;
+                    }
+
+                    const promptBarSelectors = [
+                        '[class*="sc-5c3af813"]', '[class*="sc-c9e4708a"]',
+                        '[class*="prompt-bar"]', '[class*="input-bar"]',
+                        '[class*="prompt-input"]', '[class*="bottom-bar"]',
+                    ];
+                    for (const sel of promptBarSelectors) {
+                        const containers = Array.from(document.querySelectorAll(sel)).filter(c => isVisible(c));
+                        for (const c of containers) {
+                            const imgs = Array.from(c.querySelectorAll('img[src]'));
+                            for (const img of imgs) {
+                                if (!isVisible(img)) continue;
+                                const src = img.getAttribute('src') || '';
+                                if (!src.includes('googleusercontent') && !src.includes('lh3.google') && !src.includes('gstatic')) {
+                                    return true;
+                                }
+                            }
+                            const chips = c.querySelectorAll(
+                                '[class*="chip"], [class*="pill"], [class*="badge"], [class*="attachment"], [class*="media-tag"], [class*="seed"]'
+                            );
+                            if (chips.length > 0) return true;
+                        }
+                    }
+
+                    const submitBtn = Array.from(document.querySelectorAll('button')).find(b => {
+                        if (!isVisible(b)) return false;
+                        const txt = (b.innerText || b.textContent || '').trim();
+                        return txt.includes('Create') || txt.includes('arrow_forward');
+                    });
+                    if (submitBtn && !submitBtn.disabled && submitBtn.getAttribute('aria-disabled') !== 'true') {
+                        const addToPromptVisible = Array.from(document.querySelectorAll('button')).some(b => {
+                            if (!isVisible(b)) return false;
+                            const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
+                            return txt.includes('add to prompt');
+                        });
+                        if (!addToPromptVisible) return true;
+                    }
+
+                    return false;
+                });
+
+                if (!attachmentVerified) await page.waitForTimeout(500);
+            }
+
+            if (attachmentVerified) {
+                console.log(`      ✅ Media attachment confirmed in prompt bar (round ${round})!`);
+                break;
+            }
+        }
+
+        if (!attachmentVerified) {
+            try { if (existsSync(tmpPath)) unlinkSync(tmpPath); } catch {}
+            throw new Error(`[GoogleFX] ❌ Failed to verify media attachment in prompt bar after 3 attempts. Aborting prompt submission.`);
+        }
+
+        // ── Final wait: ensure panel is fully closed and prompt bar is stable ──
+        console.log(`      ⏳ Ensuring media panel is fully closed...`);
+        const panelCloseStart = Date.now();
+        while (Date.now() - panelCloseStart < 15000) {
+            const panelStillOpen = await page.evaluate(() => {
+                const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+                return Array.from(document.querySelectorAll('button')).some(b => {
+                    if (!isVisible(b)) return false;
+                    const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
+                    return txt === 'add to prompt' || txt.includes('add to prompt');
+                });
+            });
+            if (!panelStillOpen) {
+                console.log(`      ✅ Media panel fully closed`);
+                break;
+            }
+            await page.waitForTimeout(400);
+        }
+
+        await page.waitForTimeout(2000);
+
+        console.log(`      📸 Capturing uploaded media DOM URLs for exclusion list...`);
+        const capturedUploadUrls = await page.evaluate(() => {
+            const urls = new Set();
+            document.querySelectorAll('img[src], video[src], video source[src], [src]').forEach(el => {
+                const src = el.getAttribute('src') || '';
+                if (!src || src.startsWith('data:')) return;
+                if (src.startsWith('blob:') || src.startsWith('http')) urls.add(src);
+            });
+            return Array.from(urls);
+        });
+        console.log(`      ✅ Captured ${capturedUploadUrls.length} uploaded media URLs for exclusion`);
+        this._lastUploadedMediaUrls = capturedUploadUrls;
+
+        try {
+            if (existsSync(tmpPath)) {
+                unlinkSync(tmpPath);
+                console.log(`      🗑️ Temp upload file deleted: ${tmpPath}`);
+            }
+        } catch (cleanErr) {}
+
+        return this._lastUploadedMediaUrls || [];
+    }
+
     async _submitPrompt(page, prompt) {
         console.log(`      ⌨️ Submitting prompt into main bottom prompt bar...`);
 
@@ -1198,27 +1959,336 @@ export class GoogleFxFlowTool extends BaseTool {
         }
 
         await page.waitForTimeout(3000);
+
+        // Capture post-submit snapshot of all media URLs (including uploaded reference video in prompt history card)
+        const postSubmitUrls = await page.evaluate(() => {
+            const urls = new Set();
+            document.querySelectorAll('img[src], video[src], video source[src], [src]').forEach(el => {
+                const src = el.getAttribute('src') || '';
+                if (src && !src.startsWith('data:')) urls.add(src);
+            });
+            return Array.from(urls);
+        });
+        console.log(`      📸 Post-submit snapshot: ${postSubmitUrls.length} media URLs captured (uploaded reference video included in exclusions)`);
+        return postSubmitUrls;
     }
 
-    async _extractResult(page, type, itemId) {
-        const timeoutMs = config.browser.timeoutMs || 240000;
-        const startTime = Date.now();
-        const pollInterval = 3000;
 
-        console.log(`      ⏳ Initial 5s delay for ${type} generation to initialize on Google Flow...`);
-        await page.waitForTimeout(5000);
+    async _applyResultFilter(page) {
+        console.log(`      🔍 Applying UI Filter: "Generated" ON, "Uploaded" OFF...`);
+        try {
+            // ── Step 1: Open the Filters panel ────────────────────────────────
+            // The filter button is the funnel icon button in the top header area.
+            // New UI: no text label, just an icon. Multiple selectors tried.
+            const filterPanelOpened = await page.evaluate(() => {
+                const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+
+                // Check if filter panel is already open (has "Filters" heading visible)
+                const filtersHeading = Array.from(document.querySelectorAll('h2, h3, [class*="heading"], span, div'))
+                    .find(el => isVisible(el) && (el.innerText || el.textContent || '').trim() === 'Filters');
+                if (filtersHeading) return 'already_open';
+
+                // Try to find and click the filter button (funnel icon)
+                const allBtns = Array.from(document.querySelectorAll('button, [role="button"]'));
+
+                // Strategy 1: button with 'filter_list' or 'tune' or 'filter_alt' google icon
+                const iconBtn = allBtns.find(b => {
+                    if (!isVisible(b)) return false;
+                    const icons = Array.from(b.querySelectorAll('i, [class*="google-symbols"], [class*="material-icons"], svg'));
+                    return icons.some(i => {
+                        const t = (i.textContent || i.getAttribute('aria-label') || '').trim();
+                        return t === 'filter_list' || t === 'tune' || t === 'filter_alt' || t === 'filter';
+                    });
+                });
+                if (iconBtn) { iconBtn.click(); return 'clicked_icon'; }
+
+                // Strategy 2: button with aria-label containing filter/sort
+                const ariaBtn = allBtns.find(b => {
+                    if (!isVisible(b)) return false;
+                    const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+                    return aria.includes('filter') || aria.includes('sort');
+                });
+                if (ariaBtn) { ariaBtn.click(); return 'clicked_aria'; }
+
+                // Strategy 3: button in header area (top 80px) that is not search/settings/add
+                const headerBtns = allBtns.filter(b => {
+                    if (!isVisible(b)) return false;
+                    const rect = b.getBoundingClientRect();
+                    if (rect.top > 80) return false; // must be in header
+                    const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
+                    // exclude known non-filter buttons
+                    return !txt.includes('new') && !txt.includes('add') && !txt.includes('agent') &&
+                           !txt.includes('help') && !txt.includes('settings') &&
+                           rect.width < 100; // filter btn is compact (icon only)
+                });
+                // Pick the rightmost header button (filter is usually on the right side)
+                if (headerBtns.length > 0) {
+                    const rightmost = headerBtns.reduce((a, b) => {
+                        const ar = a.getBoundingClientRect(), br = b.getBoundingClientRect();
+                        return ar.left > br.left ? a : b;
+                    });
+                    rightmost.click();
+                    return 'clicked_header';
+                }
+
+                return false;
+            });
+
+            if (!filterPanelOpened) {
+                console.warn(`      ⚠️ Could not find filter button — skipping filter apply`);
+                return;
+            }
+
+            console.log(`      ✅ Filter panel: ${filterPanelOpened}`);
+            await page.waitForTimeout(800); // wait for panel animation
+
+            // ── Step 2: Verify panel is open, then set Generated=ON, Uploaded=OFF ───
+            const filterResult = await page.evaluate(() => {
+                const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+
+                // Find all clickable items in the Filters panel
+                // New UI uses label+checkbox combos or div-based items
+                const findCheckboxItem = (labelText) => {
+                    // Strategy A: <label> containing text
+                    const labels = Array.from(document.querySelectorAll('label'));
+                    const matchedLabel = labels.find(l => {
+                        if (!isVisible(l)) return false;
+                        const txt = (l.innerText || l.textContent || '').trim();
+                        return txt === labelText || txt.startsWith(labelText);
+                    });
+                    if (matchedLabel) return { el: matchedLabel, type: 'label' };
+
+                    // Strategy B: Any visible element whose TEXT exactly matches
+                    const allEls = Array.from(document.querySelectorAll(
+                        'button, [role="checkbox"], [role="menuitem"], [role="option"], div, span'
+                    ));
+                    const textMatch = allEls.find(el => {
+                        if (!isVisible(el)) return false;
+                        const ownText = (el.childNodes && Array.from(el.childNodes)
+                            .filter(n => n.nodeType === 3)
+                            .map(n => n.textContent.trim())
+                            .join('')) || (el.innerText || '').trim();
+                        return ownText === labelText;
+                    });
+                    if (textMatch) return { el: textMatch, type: 'text' };
+
+                    // Strategy C: Broader text search
+                    const broadMatch = allEls.find(el => {
+                        if (!isVisible(el)) return false;
+                        const txt = (el.innerText || el.textContent || '').trim();
+                        return txt === labelText || (txt.startsWith(labelText) && txt.length < labelText.length + 10);
+                    });
+                    if (broadMatch) return { el: broadMatch, type: 'broad' };
+
+                    return null;
+                };
+
+                const isItemChecked = (item) => {
+                    if (!item) return false;
+                    const el = item.el;
+
+                    // Check associated input[type=checkbox]
+                    const inputId = el.getAttribute('for');
+                    if (inputId) {
+                        const input = document.getElementById(inputId);
+                        if (input) return input.checked;
+                    }
+                    const siblingInput = el.querySelector('input[type="checkbox"]');
+                    if (siblingInput) return siblingInput.checked;
+
+                    // Check aria-checked
+                    const ariaChecked = el.getAttribute('aria-checked');
+                    if (ariaChecked !== null) return ariaChecked === 'true';
+
+                    // Check data-state
+                    const dataState = el.getAttribute('data-state');
+                    if (dataState) return dataState === 'checked' || dataState === 'on';
+
+                    // Check for check_box vs check_box_outline_blank icon text
+                    const icons = Array.from(el.querySelectorAll('i, [class*="google-symbols"], [class*="material-icons"]'));
+                    const iconText = icons.map(i => (i.textContent || '').trim()).join(' ');
+                    if (iconText.includes('check_box') && !iconText.includes('outline_blank')) return true;
+                    if (iconText.includes('check_box_outline_blank')) return false;
+
+                    // Check background/fill color of checkbox svg or shape
+                    const svgs = Array.from(el.querySelectorAll('svg rect, svg path'));
+                    // No reliable way without computed styles in evaluate context
+
+                    // Fallback: check class names for selected/active/checked state
+                    const cls = (el.className || '').toLowerCase();
+                    return cls.includes('selected') || cls.includes('active') || cls.includes('checked');
+                };
+
+                const genItem = findCheckboxItem('Generated');
+                const upItem = findCheckboxItem('Uploaded');
+
+                const result = {
+                    genFound: !!genItem,
+                    upFound: !!upItem,
+                    genWasChecked: isItemChecked(genItem),
+                    upWasChecked: isItemChecked(upItem),
+                    genClicked: false,
+                    upClicked: false,
+                };
+
+                // Ensure Generated is CHECKED
+                if (genItem && !result.genWasChecked) {
+                    if (window.__highlight) window.__highlight(genItem.el);
+                    genItem.el.click();
+                    result.genClicked = true;
+                }
+
+                // Ensure Uploaded is UNCHECKED
+                if (upItem && result.upWasChecked) {
+                    if (window.__highlight) window.__highlight(upItem.el);
+                    upItem.el.click();
+                    result.upClicked = true;
+                }
+
+                return result;
+            });
+
+            console.log(`      📊 Filter state: Generated [found=${filterResult.genFound}, wasChecked=${filterResult.genWasChecked}, clicked=${filterResult.genClicked}] | Uploaded [found=${filterResult.upFound}, wasChecked=${filterResult.upWasChecked}, clicked=${filterResult.upClicked}]`);
+
+            await page.waitForTimeout(500);
+
+            // ── Step 3: If items not found via JS, try Playwright locators ────────────
+            if (!filterResult.genFound || !filterResult.upFound) {
+                console.log(`      ⚠️ JS strategy missed items — trying Playwright locators...`);
+
+                // Try to find "Generated" label/button using Playwright text matching
+                try {
+                    const genLocator = page.locator('text=Generated').first();
+                    if (await genLocator.isVisible({ timeout: 2000 }).catch(() => false)) {
+                        // Check if it's unchecked by looking for associated checkbox
+                        const genParent = genLocator.locator('..');
+                        const checkbox = genParent.locator('input[type="checkbox"]').first();
+                        const isChecked = await checkbox.isChecked({ timeout: 1000 }).catch(() => false);
+                        if (!isChecked) {
+                            await genLocator.click({ timeout: 2000 }).catch(() => {});
+                            console.log(`      ✅ Clicked "Generated" via Playwright locator`);
+                        }
+                    }
+                } catch (e) {
+                    console.warn(`      ⚠️ Playwright "Generated" locator failed: ${e.message}`);
+                }
+
+                try {
+                    const upLocator = page.locator('text=Uploaded').first();
+                    if (await upLocator.isVisible({ timeout: 2000 }).catch(() => false)) {
+                        const upParent = upLocator.locator('..');
+                        const checkbox = upParent.locator('input[type="checkbox"]').first();
+                        const isChecked = await checkbox.isChecked({ timeout: 1000 }).catch(() => false);
+                        if (isChecked) {
+                            await upLocator.click({ timeout: 2000 }).catch(() => {});
+                            console.log(`      ✅ Clicked "Uploaded" via Playwright locator (to uncheck)`);
+                        }
+                    }
+                } catch (e) {
+                    console.warn(`      ⚠️ Playwright "Uploaded" locator failed: ${e.message}`);
+                }
+                await page.waitForTimeout(500);
+            }
+
+            // ── Step 4: Close the Filters panel ───────────────────────────────
+            // Click outside the panel or press Escape
+            await page.keyboard.press('Escape');
+            await page.waitForTimeout(600);
+
+            // Verify panel closed; if not, click elsewhere
+            const panelStillOpen = await page.evaluate(() => {
+                return Array.from(document.querySelectorAll('h2, h3, span, div'))
+                    .some(el => el.offsetWidth > 0 && (el.innerText || el.textContent || '').trim() === 'Filters');
+            });
+            if (panelStillOpen) {
+                console.log(`      ⚠️ Panel still open after Escape — clicking elsewhere to close...`);
+                await page.mouse.click(200, 400).catch(() => {});
+                await page.waitForTimeout(400);
+            }
+
+            console.log(`      ✅ Filter applied: Generated ON, Uploaded OFF`);
+        } catch (err) {
+            console.warn(`      ⚠️ Error in _applyResultFilter: ${err.message}`);
+        }
+    }
+
+
+    async _extractResult(page, type, itemId, preExistingUrls = []) {
+        const excludedUrlSet = new Set(preExistingUrls);
+        const startTime = Date.now();
+        let lastActivityTime = Date.now();
+        let lastProgressPct = -1;
+        const maxStaleMs = 600000; // Allow up to 10 minutes of active generation progress
+
+        console.log(`      ⏳ Real-Time Generation Tracking: Monitoring live DOM percentage, spinners, & new ${type.toUpperCase()} assets...`);
 
         let resultData = null;
+        let pollCount = 0;
 
-        while (Date.now() - startTime < timeoutMs) {
-            const extracted = await page.evaluate((targetType) => {
-                const mediaUrls = [];
-                let videoUrl = null;
-                let imageUrl = null;
+        // Apply filter ("Generated" ON, "Uploaded" OFF) once so uploaded reference media is hidden in feed
+        await this._applyResultFilter(page);
 
-                // Helper to check if URL/img is profile photo, avatar, or UI icon
-                const isProfileOrUi = (src, imgEl) => {
+        while (Date.now() - lastActivityTime < maxStaleMs) {
+            pollCount++;
+            const elapsedSec = Math.round((Date.now() - startTime) / 1000);
+
+            // Scan live DOM for percentages, progress loaders, and newly generated media URLs
+            const liveState = await page.evaluate(({ targetType, excludedUrls }) => {
+                const excludedSet = new Set(excludedUrls);
+                const bodyText = (document.body && document.body.innerText) || '';
+
+                // 1. Percentage tracking (e.g., 15%, 50%, 99%)
+                const pctMatches = bodyText.match(/(\d{1,3})\s*%/g);
+                let currentPct = null;
+                if (pctMatches && pctMatches.length > 0) {
+                    for (const match of pctMatches) {
+                        const val = parseInt(match.replace('%', '').trim(), 10);
+                        if (val >= 0 && val <= 100) {
+                            currentPct = val;
+                            break;
+                        }
+                    }
+                }
+
+                // Check aria-valuenow attributes on progress elements as fallback
+                if (currentPct === null) {
+                    const progressEls = Array.from(document.querySelectorAll('[role="progressbar"], progress, [aria-valuenow]'));
+                    for (const el of progressEls) {
+                        if (el.offsetWidth > 0 && el.offsetHeight > 0) {
+                            const val = el.getAttribute('aria-valuenow') || el.getAttribute('value');
+                            if (val && !isNaN(parseFloat(val))) {
+                                const parsed = Math.round(parseFloat(val));
+                                if (parsed >= 0 && parsed <= 100) {
+                                    currentPct = parsed;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 2. Active generation loaders / spinners / status text
+                const hasActiveSpinner = Array.from(document.querySelectorAll('[role="progressbar"], progress, [class*="spinner"], svg[class*="loading"], [class*="loader"]')).some(
+                    el => el.offsetWidth > 0 && el.offsetHeight > 0
+                );
+
+                const isGeneratingText = bodyText.includes('Generating') || bodyText.includes('generating') ||
+                                         bodyText.includes('Creating') || bodyText.includes('creating') ||
+                                         bodyText.includes('Rendering') || bodyText.includes('processing') ||
+                                         bodyText.includes('Thinking') || bodyText.includes('Analyzing');
+
+                let statusText = '';
+                const statusMatch = bodyText.match(/(Generating[^\.\n]*|Creating[^\.\n]*|Rendering[^\.\n]*|Thinking[^\.\n]*|Analyzing[^\.\n]*|Processing[^\.\n]*)/i);
+                if (statusMatch) {
+                    statusText = statusMatch[1].trim();
+                }
+
+                // 3. Scan for NEW generated media URLs (excluding uploaded reference media & pre-existing URLs)
+                const isProfileOrUi = (src) => {
                     if (!src || src.startsWith('data:')) return true;
+                    if (excludedSet.has(src)) return true;
+                    if (src.startsWith('blob:')) return true;
+
                     const lowerSrc = src.toLowerCase();
                     if (
                         lowerSrc.includes('googleusercontent.com') ||
@@ -1234,93 +2304,110 @@ export class GoogleFxFlowTool extends BaseTool {
                         lowerSrc.includes('account')
                     ) return true;
 
-                    if (imgEl && ((imgEl.clientWidth > 0 && imgEl.clientWidth < 150) || (imgEl.clientHeight > 0 && imgEl.clientHeight < 150))) {
-                        return true;
-                    }
                     return false;
                 };
 
-                // Scan videos
+                const newMediaUrls = [];
+                let newVideoUrl = null;
+                let newImageUrl = null;
+
+                // Scan video elements
                 document.querySelectorAll('video').forEach((vid) => {
                     const src = vid.getAttribute('src') || (vid.querySelector('source') && vid.querySelector('source').getAttribute('src'));
-                    if (src && !src.startsWith('data:')) {
-                        mediaUrls.push(src);
-                        if (!videoUrl) videoUrl = src;
+                    if (src && !isProfileOrUi(src)) {
+                        newMediaUrls.push(src);
+                        if (!newVideoUrl) newVideoUrl = src;
                     }
                 });
 
-                // Scan generated images ONLY
+                // Scan image elements
                 document.querySelectorAll('img').forEach((img) => {
                     const src = img.getAttribute('src') || '';
-                    if (!isProfileOrUi(src, img)) {
-                        mediaUrls.push(src);
-                        if (!imageUrl) imageUrl = src;
+                    if (src && !isProfileOrUi(src)) {
+                        const w = img.clientWidth || img.naturalWidth || 0;
+                        const h = img.clientHeight || img.naturalHeight || 0;
+                        if ((w === 0 || w >= 250) && (h === 0 || h >= 250)) {
+                            newMediaUrls.push(src);
+                            if (!newImageUrl) newImageUrl = src;
+                        }
                     }
                 });
 
-                // Check for active progress spinners or generating indicators
-                const isGenerating =
-                    document.querySelector('[class*="spinner"]') !== null ||
-                    document.querySelector('[class*="loading"]') !== null ||
-                    document.querySelector('[class*="progress"]') !== null ||
-                    document.querySelector('[class*="generating"]') !== null ||
-                    (document.body && document.body.innerText.includes('Generating'));
-
-                const textContent = (document.body && document.body.innerText) ? document.body.innerText.substring(0, 3000) : '';
-
                 return {
-                    mediaUrls: Array.from(new Set(mediaUrls)),
-                    videoUrl: targetType === 'video' ? (videoUrl || mediaUrls[0] || null) : null,
-                    imageUrl: targetType === 'image' ? (imageUrl || mediaUrls[0] || null) : null,
-                    isGenerating,
-                    text: textContent,
+                    currentPct,
+                    statusText,
+                    hasActiveSpinner,
+                    isGeneratingText,
+                    mediaUrls: Array.from(new Set(newMediaUrls)),
+                    videoUrl: newVideoUrl,
+                    imageUrl: newImageUrl,
+                    text: bodyText.substring(0, 3000),
                 };
-            }, type);
+            }, { targetType: type, excludedUrls: Array.from(excludedUrlSet) });
 
-            const elapsedSec = Math.round((Date.now() - startTime) / 1000);
+            // Log live percentage & status updates if present in DOM & reset activity timer
+            if (liveState.currentPct !== null && liveState.currentPct !== lastProgressPct) {
+                console.log(`      🎬 Live UI Generation Progress: ${liveState.currentPct}% ${liveState.statusText ? `(${liveState.statusText})` : ''} (${elapsedSec}s)`);
+                lastProgressPct = liveState.currentPct;
+                lastActivityTime = Date.now();
 
-            // If target asset type is found and generation spinners have stopped
-            const hasTargetAsset = type === 'video' ? extracted.videoUrl : extracted.imageUrl;
+                if (itemId) {
+                    try {
+                        const jobsCol = getJobsCollection();
+                        await jobsCol.updateOne(
+                            { itemId },
+                            {
+                                $set: {
+                                    progressPct: liveState.currentPct,
+                                    progressStatus: liveState.statusText ? `Generating: ${liveState.statusText} (${liveState.currentPct}%)` : `Generating video (${liveState.currentPct}%)...`,
+                                    updatedAt: new Date(),
+                                }
+                            }
+                        );
+                    } catch (e) {}
+                }
+            } else if (liveState.hasActiveSpinner || liveState.isGeneratingText) {
+                lastActivityTime = Date.now();
+                if (pollCount % 3 === 0) {
+                    console.log(`      🎬 Live UI Generation Progress: ${liveState.statusText || 'Generating video in progress...'} (${elapsedSec}s)`);
+                    if (itemId) {
+                        try {
+                            const jobsCol = getJobsCollection();
+                            await jobsCol.updateOne(
+                                { itemId },
+                                {
+                                    $set: {
+                                        progressStatus: liveState.statusText ? `Generating: ${liveState.statusText}` : 'Generating video in Google Flow...',
+                                        updatedAt: new Date(),
+                                    }
+                                }
+                            );
+                        } catch (e) {}
+                    }
+                }
+            }
 
-            if (hasTargetAsset && !extracted.isGenerating) {
-                console.log(`      ✅ ${type.toUpperCase()} asset generated after ${elapsedSec}s!`);
+            // CRITICAL GATE: ONLY MARK COMPLETED WHEN A NEW GENERATED ASSET IS FOUND (TOTAL ASSETS > 0)!
+            const targetAsset = type === 'video' ? liveState.videoUrl : (liveState.imageUrl || liveState.videoUrl);
+
+            if (targetAsset && liveState.mediaUrls.length > 0 && !liveState.hasActiveSpinner) {
+                console.log(`      ✨ GENERATION COMPLETED! Found ${liveState.mediaUrls.length} new asset(s) in ${elapsedSec}s.`);
+                console.log(`      🔗 New Generated Asset URL: ${targetAsset}`);
                 resultData = {
-                    videoUrl: type === 'video' ? extracted.videoUrl : null,
-                    imageUrl: type === 'image' ? extracted.imageUrl : null,
-                    mediaUrls: extracted.mediaUrls,
-                    text: extracted.text,
+                    videoUrl: type === 'video' ? liveState.videoUrl : null,
+                    imageUrl: type === 'image' ? liveState.imageUrl : null,
+                    mediaUrls: liveState.mediaUrls,
+                    text: liveState.text,
                 };
                 break;
             }
 
-            console.log(`      ⏳ Generation in progress (${elapsedSec}s)... found ${extracted.mediaUrls.length} AI assets`);
-            await page.waitForTimeout(pollInterval);
+            if (page.isClosed()) break;
+            await page.waitForTimeout(5000);
         }
 
-        if (!resultData) {
-            // Timeout fallback: extract whatever is present (STRICTLY EXCLUDING PROFILES)
-            resultData = await page.evaluate((targetType) => {
-                const mediaUrls = [];
-                document.querySelectorAll('video[src], video source[src], img[src]').forEach((el) => {
-                    const src = el.getAttribute('src') || '';
-                    const lowerSrc = src.toLowerCase();
-                    const isProfile =
-                        lowerSrc.includes('googleusercontent.com') ||
-                        lowerSrc.includes('lh3.google') ||
-                        lowerSrc.includes('ggpht.com') ||
-                        lowerSrc.includes('profile') ||
-                        lowerSrc.includes('avatar') ||
-                        lowerSrc.includes('favicon') ||
-                        lowerSrc.includes('gstatic');
-                    if (src && !isProfile) mediaUrls.push(src);
-                });
-                return {
-                    videoUrl: targetType === 'video' ? (mediaUrls.find((u) => u.includes('.mp4') || u.includes('video')) || mediaUrls[0] || null) : null,
-                    imageUrl: targetType === 'image' ? (mediaUrls.find((u) => !u.includes('googleusercontent') && (!u.includes('.mp4'))) || mediaUrls[0] || null) : null,
-                    mediaUrls: Array.from(new Set(mediaUrls)),
-                    text: document.body.innerText.substring(0, 3000),
-                };
-            }, type);
+        if (!resultData || (!resultData.videoUrl && !resultData.imageUrl && (!resultData.mediaUrls || resultData.mediaUrls.length === 0))) {
+            throw new Error(`[GoogleFX] ❌ Generation failed or timed out — Total Assets was 0 (No new generated video/image URL detected in DOM).`);
         }
 
         // ─── Fix relative URLs → absolute & Enforce Strict Type Isolation ───

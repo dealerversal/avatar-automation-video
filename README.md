@@ -40,6 +40,7 @@ Server runs on `http://localhost:5001`.
   {
     "type": "video", // "video" or "image"
     "prompt": "A futuristic electric supercar driving through a neon city at night",
+    "mediaUrl": "https://example.com/reference-media.mp4", // optional input media (image or video)
     "settings": {
       "model": "omni-flash",
       "aspectRatio": "16:9",

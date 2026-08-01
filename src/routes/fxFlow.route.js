@@ -16,7 +16,13 @@ const generateSchema = Joi.object({
     }),
     type: Joi.string().valid('video', 'image').optional().default('video'),
     settings: Joi.object().optional().default({}),
-});
+    mediaUrl: Joi.string().uri().optional().allow(null, '').messages({
+        'string.uri': 'mediaUrl must be a valid URL',
+    }),
+    imageUrl: Joi.string().uri().optional().allow(null, '').messages({
+        'string.uri': 'imageUrl must be a valid URL',
+    }),
+}).unknown(true);
 
 /**
  * POST /api/fx-flow/generate (and POST /api/fx-flow)
@@ -35,6 +41,7 @@ const handleGenerate = async (req, res) => {
     }
 
     const { prompt, type, settings } = value;
+    const mediaUrl = value.mediaUrl || value.imageUrl || null;
     const itemId = `gen_${uuidv4().replace(/-/g, '').substring(0, 12)}`;
 
     logger.info(`[FxFlowRoute] [${requestId}] New ${type} request queued: "${prompt.substring(0, 60)}..." (itemId: ${itemId})`);
@@ -47,6 +54,8 @@ const handleGenerate = async (req, res) => {
             type,
             prompt,
             settings,
+            mediaUrl,
+            imageUrl: mediaUrl,
             status: 'pending',
             result: {
                 videoUrl: null,
@@ -69,6 +78,8 @@ const handleGenerate = async (req, res) => {
             type,
             prompt,
             settings,
+            mediaUrl,
+            imageUrl: mediaUrl,
         });
 
         return res.status(202).json({
@@ -78,6 +89,8 @@ const handleGenerate = async (req, res) => {
             type,
             prompt,
             settings,
+            mediaUrl,
+            imageUrl: mediaUrl,
             message: `Generation job queued successfully. Check status at /api/fx-flow/status/${itemId}`,
             statusUrl: `/api/fx-flow/status/${itemId}`,
             request_id: requestId,
@@ -122,9 +135,12 @@ router.get('/status/:itemId', async (req, res) => {
             success: true,
             itemId: job.itemId,
             status: job.status,
+            progressPct: job.progressPct || (job.status === 'completed' ? 100 : 0),
+            progressStatus: job.progressStatus || (job.status === 'completed' ? 'Completed' : job.status),
             type: job.type,
             prompt: job.prompt,
             settings: job.settings,
+            mediaUrl: job.mediaUrl || job.imageUrl || null,
             r2Url,
             r2Key,
             result: job.result,

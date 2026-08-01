@@ -30,10 +30,12 @@ class GenerationQueue {
         this.isProcessing = true;
         const currentJobData = this.queue.shift();
         const { itemId, type, prompt, settings } = currentJobData;
+        const mediaUrl = currentJobData.mediaUrl || currentJobData.imageUrl || null;
 
         console.log('\n' + '═'.repeat(60));
         console.log(`⚙️  [Queue Worker] Processing Job: ${itemId}`);
         console.log(`🎬  Type: ${type} | Prompt: "${prompt.substring(0, 80)}..."`);
+        if (mediaUrl) console.log(`🖼️   Media URL: ${mediaUrl}`);
         console.log('═'.repeat(60));
 
         const startTime = Date.now();
@@ -49,7 +51,7 @@ class GenerationQueue {
 
             // Get automation tool
             const tool = registry.getTool('google_fx_flow');
-            const result = await tool.execute({ itemId, prompt, type, settings });
+            const result = await tool.execute({ itemId, prompt, type, settings, mediaUrl, imageUrl: mediaUrl });
 
             const durationMs = Date.now() - startTime;
             const primaryVideoUrl = result.videoUrl || (result.mediaUrls && result.mediaUrls.find(url => url.includes('.mp4') || url.includes('video'))) || (result.mediaUrls && result.mediaUrls[0]) || null;
