@@ -1554,43 +1554,68 @@ export class GoogleFxFlowTool extends BaseTool {
                 }
 
                 // ── Real-Time UI Upload & Processing Progress Tracking ─────────
-                console.log(`      ⏳ Real-Time UI Tracking: Monitoring file upload & cloud processing...`);
+                // PHASE 1: Monitors background video/image upload until 100% / loaders clear.
+                console.log(`      ⏳ Real-Time UI Tracking: Monitoring background upload...`);
                 let uploadCompletedInUI = false;
+                let uploadDoneInBackground = false;
                 const uploadStartTime = Date.now();
                 let lastActivityTime = Date.now();
                 let lastProgressPct = -1;
-                const maxStaleMs = 300000; // Allow up to 5 minutes of active progress
+                let uploadStarted = false;
+                let sawProgress = false;
 
-                while (Date.now() - lastActivityTime < maxStaleMs) {
-                    const elapsedSec = Math.round((Date.now() - uploadStartTime) / 1000);
-
-                    // Read live UI progress indicators (Percentages, Progress bars, Status text, Add to Prompt)
-                    const uiProgress = await page.evaluate(() => {
+                // Wait up to 20s for upload indicator to start in UI
+                for (let waitStart = 0; waitStart < 13 && !uploadStarted; waitStart++) {
+                    const hasStarted = await page.evaluate(() => {
                         const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
                         const bodyText = document.body ? document.body.innerText || '' : '';
 
-                        // 1. Percentage tracking (e.g. 15%, 65%, 99%)
+                        if (/\d{1,3}\s*%/.test(bodyText)) return true;
+
+                        const loader = document.querySelector('[role="progressbar"], progress, [class*="progress"], [class*="spinner"], svg[class*="loading"], [class*="loader"], [class*="overlay"]');
+                        if (loader && isVisible(loader)) return true;
+
+                        return bodyText.includes('Uploading') || bodyText.includes('uploading') || bodyText.includes('Processing') || bodyText.includes('processing') || bodyText.includes('Transcoding');
+                    });
+
+                    if (hasStarted) {
+                        uploadStarted = true;
+                        sawProgress = true;
+                        console.log(`      ✅ Upload activity detected in UI (${waitStart * 1.5}s elapsed)`);
+                        break;
+                    }
+                    await page.waitForTimeout(1500);
+                }
+
+                const maxStaleMs = 300000; // 5 minutes max
+                while (Date.now() - lastActivityTime < maxStaleMs) {
+                    const elapsedSec = Math.round((Date.now() - uploadStartTime) / 1000);
+
+                    const uiState = await page.evaluate(() => {
+                        const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+                        const bodyText = document.body ? document.body.innerText || '' : '';
+
+                        // Percentage progress (e.g., 5%, 50%, 99%)
                         const pctMatches = bodyText.match(/(\d{1,3})\s*%/g);
                         let currentPct = null;
-                        if (pctMatches && pctMatches.length > 0) {
-                            for (const match of pctMatches) {
-                                const val = parseInt(match.replace('%', '').trim(), 10);
-                                if (val >= 0 && val <= 100) {
-                                    currentPct = val;
-                                    break;
-                                }
+                        if (pctMatches) {
+                            for (const m of pctMatches) {
+                                const v = parseInt(m.replace('%', '').trim(), 10);
+                                if (v >= 0 && v <= 100) { currentPct = v; break; }
                             }
                         }
 
-                        // 2. Active progressbar / spinner / loading elements
-                        const hasActiveLoader = Array.from(document.querySelectorAll('[role="progressbar"], progress, [class*="progress"], [class*="spinner"], svg[class*="loading"], [class*="loader"]')).some(isVisible);
+                        // Active loaders/spinners
+                        const hasLoader = Array.from(document.querySelectorAll(
+                            '[role="progressbar"], progress, [class*="progress"], [class*="spinner"], svg[class*="loading"], [class*="loader"], [class*="overlay"], svg circle'
+                        )).some(el => isVisible(el) && el.getBoundingClientRect().width > 5);
 
-                        // 3. Active processing status text
-                        const isProcessingText = bodyText.includes('Uploading') || bodyText.includes('uploading') ||
-                                                 bodyText.includes('Processing') || bodyText.includes('processing') ||
-                                                 bodyText.includes('Transcoding') || bodyText.includes('Saving');
+                        // Processing status text
+                        const isProcessing = bodyText.includes('Uploading') || bodyText.includes('uploading') ||
+                            bodyText.includes('Processing') || bodyText.includes('processing') ||
+                            bodyText.includes('Transcoding') || bodyText.includes('Saving');
 
-                        // 4. Prompt bar attachment verification
+                        // Clear/remove prompt button already present in prompt bar
                         const clearBtn = Array.from(document.querySelectorAll('button')).find(b => {
                             if (!isVisible(b)) return false;
                             const txt = (b.innerText || b.textContent || '').toLowerCase();
@@ -1598,124 +1623,201 @@ export class GoogleFxFlowTool extends BaseTool {
                             return txt.includes('clear prompt') || aria.includes('clear prompt') || aria.includes('remove asset');
                         });
 
-                        // 5. Check "Add to Prompt" button
-                        const addToPromptBtn = Array.from(document.querySelectorAll('button')).find(b => {
-                            if (!isVisible(b)) return false;
-                            const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
-                            return txt === 'add to prompt' || txt.includes('add to prompt');
+                        return { currentPct, hasLoader, isProcessing, isAttached: !!clearBtn };
+                    });
+
+                    if (uiState.isAttached) {
+                        console.log(`      ✅ Media already attached to prompt bar! (${elapsedSec}s)`);
+                        uploadCompletedInUI = true;
+                        break;
+                    }
+
+                    // Track activity & report live progress percentage in console + DB
+                    if (uiState.currentPct !== null) {
+                        sawProgress = true;
+                        if (uiState.currentPct !== lastProgressPct) {
+                            console.log(`      📊 Live UI Upload Progress: ${uiState.currentPct}% (${elapsedSec}s)`);
+                            lastProgressPct = uiState.currentPct;
+                            lastActivityTime = Date.now();
+                            if (itemId) {
+                                try {
+                                    const jobsCol = getJobsCollection();
+                                    await jobsCol.updateOne({ itemId }, { $set: {
+                                        progressPct: uiState.currentPct,
+                                        progressStatus: `Uploading reference media (${uiState.currentPct}%)...`,
+                                        updatedAt: new Date(),
+                                    }});
+                                } catch (e) {}
+                            }
+                        }
+                    } else if (uiState.hasLoader || uiState.isProcessing) {
+                        sawProgress = true;
+                        lastActivityTime = Date.now();
+                    }
+
+                    // ── STRICT UPLOADING COMPLETION RULES ──
+                    // 1. CANNOT BE DONE if percentage is currently active (0% - 99%)
+                    // 2. CANNOT BE DONE if loaders or processing text are active
+                    // 3. DONE if currentPct === 100
+                    // 4. DONE if percentage reached 100% or disappeared after sawProgress AND elapsedSec >= 8
+                    // 5. For long videos where no % text was rendered, MUST wait at least 35s before completing!
+                    let isUploadDone = false;
+
+                    if (uiState.currentPct === 100) {
+                        isUploadDone = true;
+                    } else if (uiState.currentPct === null && !uiState.hasLoader && !uiState.isProcessing) {
+                        if (sawProgress && elapsedSec >= 8) {
+                            isUploadDone = true;
+                        } else if (!sawProgress && elapsedSec >= 35) {
+                            isUploadDone = true;
+                        }
+                    }
+
+                    if (isUploadDone) {
+                        console.log(`      ✅ Background upload 100% completed in UI (${elapsedSec}s elapsed) — now attaching media to prompt...`);
+                        uploadDoneInBackground = true;
+                        break;
+                    }
+
+                    await page.waitForTimeout(1500);
+                }
+
+                if (uploadCompletedInUI) {
+                    // Already attached — skip Phase 2
+                } else if (!uploadDoneInBackground) {
+                    try { if (existsSync(tmpPath)) unlinkSync(tmpPath); } catch {}
+                    throw new Error(`[GoogleFX] ❌ Media upload timed out or stalled.`);
+                } else {
+                    // ── PHASE 2: Ensure panel open → Select asset → Click "Add to Prompt" ──
+                    console.log(`      📂 Phase 2: Opening media panel and adding asset to prompt...`);
+
+                    let phase2Success = false;
+                    for (let poll = 1; poll <= 20 && !phase2Success; poll++) {
+                        // 1. Check current panel state using exact dialog & button indicators
+                        const panelState = await page.evaluate(() => {
+                            const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+
+                            // Check for "Add to Prompt" button on screen
+                            const addBtn = Array.from(document.querySelectorAll('button')).find(b => {
+                                if (!isVisible(b)) return false;
+                                const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
+                                return txt === 'add to prompt' || txt.includes('add to prompt');
+                            });
+                            if (addBtn) {
+                                const r = addBtn.getBoundingClientRect();
+                                return { isOpen: true, hasAddBtn: true, addBtnCx: Math.round(r.left + r.width / 2), addBtnCy: Math.round(r.top + r.height / 2) };
+                            }
+
+                            // Check for role="dialog" or popover tabs (Uploads, Images, Videos)
+                            const dialog = document.querySelector('[role="dialog"]');
+                            const hasDialog = dialog && isVisible(dialog);
+                            const hasTabs = Array.from(document.querySelectorAll('button, [role="tab"]')).some(b => {
+                                if (!isVisible(b)) return false;
+                                const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
+                                return txt === 'uploads' || txt === 'images' || txt === 'videos' || txt.includes('upload media');
+                            });
+
+                            return { isOpen: hasDialog || hasTabs, hasAddBtn: false, addBtnCx: null, addBtnCy: null };
                         });
 
-                        let addBtnCoords = null;
-                        if (addToPromptBtn && isVisible(addToPromptBtn)) {
-                            const isNativeDisabled = addToPromptBtn.disabled || addToPromptBtn.getAttribute('aria-disabled') === 'true';
-                            if (!isNativeDisabled) {
-                                addToPromptBtn.scrollIntoView({ block: 'center' });
-                                const r = addToPromptBtn.getBoundingClientRect();
-                                addBtnCoords = { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2) };
+                        // 2. If "Add to Prompt" button is ALREADY visible -> CLICK IT IMMEDIATELY!
+                        if (panelState.hasAddBtn && panelState.addBtnCx !== null) {
+                            console.log(`      🖱️ Clicking "Add to Prompt" button at [${panelState.addBtnCx}, ${panelState.addBtnCy}]...`);
+                            try { await page.mouse.click(panelState.addBtnCx, panelState.addBtnCy); } catch {}
+                            await page.waitForTimeout(2000);
+                            phase2Success = true;
+                            uploadCompletedInUI = true;
+                            break;
+                        }
+
+                        // 3. If panel is NOT open -> click the + button near prompt input ONCE
+                        if (!panelState.isOpen) {
+                            const plusBtnCoords = await page.evaluate(() => {
+                                const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+                                // Target exact trigger button: aria-haspopup="dialog" or icon text "add_2" / "Create"
+                                const plusBtn = Array.from(document.querySelectorAll('button')).find(b => {
+                                    if (!isVisible(b)) return false;
+                                    const txt = (b.innerText || b.textContent || '').toLowerCase();
+                                    const aria = (b.getAttribute('aria-haspopup') || '').toLowerCase();
+                                    const r = b.getBoundingClientRect();
+                                    return (aria === 'dialog' || txt.includes('add_2') || txt.includes('create')) && r.top > 500 && r.width < 65;
+                                });
+                                if (plusBtn) {
+                                    const r = plusBtn.getBoundingClientRect();
+                                    return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2) };
+                                }
+                                return null;
+                            });
+
+                            if (plusBtnCoords) {
+                                console.log(`      🖱️ Opening media panel via + button at [${plusBtnCoords.cx}, ${plusBtnCoords.cy}]...`);
+                                try { await page.mouse.click(plusBtnCoords.cx, plusBtnCoords.cy); } catch {}
+                                await page.waitForTimeout(2000);
+                                continue; // poll again now that panel is open
                             }
                         }
 
-                        const candidateAsset = Array.from(document.querySelectorAll('img[src], video[src], [class*="asset"], [class*="card"], [class*="thumbnail"]')).find(el => {
-                            if (!isVisible(el)) return false;
-                            const r = el.getBoundingClientRect();
-                            if (r.width < 25 || r.height < 25) return false;
-                            const src = el.getAttribute('src') || '';
-                            return !src.includes('googleusercontent') && !src.includes('gstatic') && !src.includes('avatar') && !src.includes('logo');
-                        });
-
-                        let assetCoords = null;
-                        if (candidateAsset) {
-                            const r = candidateAsset.getBoundingClientRect();
-                            assetCoords = { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2) };
-                        }
-
-                        return {
-                            currentPct,
-                            hasActiveLoader,
-                            isProcessingText,
-                            isAttached: !!clearBtn,
-                            hasAddBtn: !!addToPromptBtn,
-                            addBtnCoords,
-                            assetCoords,
-                        };
-                    });
-
-                    // Update activity timer if UI progress is actively changing/uploading
-                    if (uiProgress.currentPct !== null && uiProgress.currentPct !== lastProgressPct) {
-                        console.log(`      📊 Live UI Upload Progress: ${uiProgress.currentPct}% (${elapsedSec}s)`);
-                        lastProgressPct = uiProgress.currentPct;
-                        lastActivityTime = Date.now();
-
-                        if (itemId) {
-                            try {
-                                const jobsCol = getJobsCollection();
-                                await jobsCol.updateOne(
-                                    { itemId },
-                                    {
-                                        $set: {
-                                            progressPct: uiProgress.currentPct,
-                                            progressStatus: `Uploading reference media (${uiProgress.currentPct}%)...`,
-                                            updatedAt: new Date(),
-                                        }
-                                    }
-                                );
-                            } catch (e) {}
-                        }
-                    } else if (uiProgress.hasActiveLoader || uiProgress.isProcessingText) {
-                        lastActivityTime = Date.now();
-                    }
-
-                    if (uiProgress.isAttached) {
-                        console.log(`      ✅ Upload & attachment complete in UI! (${elapsedSec}s)`);
-                        uploadCompletedInUI = true;
-                        break;
-                    }
-
-                    // If uploaded video/image asset card is detected in UI, upload is DONE!
-                    if (uiProgress.assetCoords) {
-                        console.log(`      ✅ Uploaded video asset detected in UI! (${elapsedSec}s) — selecting asset & attaching to prompt...`);
-                        try { await page.mouse.click(uiProgress.assetCoords.cx, uiProgress.assetCoords.cy); } catch {}
-                        await page.waitForTimeout(800);
-
-                        if (uiProgress.addBtnCoords) {
-                            try { await page.mouse.click(uiProgress.addBtnCoords.cx, uiProgress.addBtnCoords.cy); } catch {}
-                            await page.waitForTimeout(1500);
-                        }
-
-                        uploadCompletedInUI = true;
-                        break;
-                    }
-
-                    if (uiProgress.addBtnCoords) {
-                        console.log(`      🖱️ Clicking enabled "Add to Prompt" button at [${uiProgress.addBtnCoords.cx}, ${uiProgress.addBtnCoords.cy}] (${elapsedSec}s)...`);
-                        try { await page.mouse.click(uiProgress.addBtnCoords.cx, uiProgress.addBtnCoords.cy); } catch {}
-                        await page.waitForTimeout(2000);
-                    } else if (!uiProgress.hasAddBtn) {
-                        const openCoords = await page.evaluate(() => {
+                        // 4. Panel is open but "Add to Prompt" not visible -> select an asset card in panel
+                        const cardCoords = await page.evaluate(() => {
                             const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
-                            const input = Array.from(document.querySelectorAll('textarea, input')).find(el => (el.getAttribute('placeholder') || '').toLowerCase().includes('create'));
-                            if (input) {
-                                let parent = input.parentElement;
-                                for (let i = 0; i < 6 && parent; i++) {
-                                    const btns = Array.from(parent.querySelectorAll('button')).filter(isVisible);
-                                    if (btns.length >= 1) {
-                                        const r = btns[0].getBoundingClientRect();
-                                        return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2) };
-                                    }
-                                    parent = parent.parentElement;
-                                }
+                            // Target asset option card inside role="dialog" or with role="option"
+                            const cards = Array.from(document.querySelectorAll('[role="option"], [role="listitem"], div')).filter(el => {
+                                if (!isVisible(el)) return false;
+                                const r = el.getBoundingClientRect();
+                                if (r.left < 300 || r.left > 1100 || r.top < 50 || r.top > 650) return false;
+                                if (r.width < 40 || r.height < 30) return false;
+                                const txt = (el.innerText || el.textContent || '').toLowerCase();
+                                return txt.includes('upload_ref') || txt.includes('video') || txt.includes('image') || el.getAttribute('role') === 'option';
+                            });
+
+                            if (cards.length > 0) {
+                                cards.sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);
+                                const r = cards[0].getBoundingClientRect();
+                                return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2) };
                             }
                             return null;
                         });
-                        if (openCoords) {
-                            console.log(`      📂 Opening media panel via + button (${elapsedSec}s)...`);
-                            try { await page.mouse.click(openCoords.cx, openCoords.cy); } catch {}
+
+                        if (cardCoords) {
+                            console.log(`      🖱️ Selecting asset option card at [${cardCoords.cx}, ${cardCoords.cy}] in media panel (poll ${poll}/20)...`);
+                            try { await page.mouse.click(cardCoords.cx, cardCoords.cy); } catch {}
+                            await page.waitForTimeout(1500);
+
+                            // Re-check for "Add to Prompt" button
+                            const retryAddBtn = await page.evaluate(() => {
+                                const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+                                const addBtn = Array.from(document.querySelectorAll('button')).find(b => {
+                                    if (!isVisible(b)) return false;
+                                    const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
+                                    return txt === 'add to prompt' || txt.includes('add to prompt');
+                                });
+                                if (addBtn) {
+                                    const r = addBtn.getBoundingClientRect();
+                                    return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2) };
+                                }
+                                return null;
+                            });
+
+                            if (retryAddBtn) {
+                                console.log(`      🖱️ Clicking "Add to Prompt" button at [${retryAddBtn.cx}, ${retryAddBtn.cy}]...`);
+                                try { await page.mouse.click(retryAddBtn.cx, retryAddBtn.cy); } catch {}
+                                await page.waitForTimeout(2000);
+                                phase2Success = true;
+                                uploadCompletedInUI = true;
+                                break;
+                            }
+                        } else {
+                            console.log(`      ⏳ Waiting for panel cards to finish processing (poll ${poll}/20)...`);
                             await page.waitForTimeout(1500);
                         }
                     }
 
-                    await page.waitForTimeout(2000);
+                    if (!phase2Success) {
+                        console.warn(`      ⚠️ Could not explicitly click Add to Prompt — proceeding to verify attachment`);
+                        uploadCompletedInUI = true;
+                    }
                 }
+
 
                 if (!uploadCompletedInUI) {
                     try { if (existsSync(tmpPath)) unlinkSync(tmpPath); } catch {}
@@ -1735,7 +1837,6 @@ export class GoogleFxFlowTool extends BaseTool {
             try { if (existsSync(tmpPath)) unlinkSync(tmpPath); } catch {}
             throw new Error(`[GoogleFX] ❌ Media upload failed: file chooser was not triggered or file set failed after 3 attempts.`);
         }
-
 
         // ── CRITICAL: Verify attachment actually appeared in prompt bar ──────
         console.log(`      🔍 Waiting for media attachment to appear in the prompt bar...`);
