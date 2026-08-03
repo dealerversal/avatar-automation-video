@@ -531,27 +531,62 @@ export class GoogleFxFlowTool extends BaseTool {
         console.log(`      🧹 Overlay dismissal complete`);
     }
 
+    async _ensureAgentModeEnabled(page) {
+        console.log(`      🤖 Ensuring Agent mode pill is turned ON (white active pill background)...`);
+        for (let attempt = 1; attempt <= 3; attempt++) {
+            const agentCoords = await page.evaluate(() => {
+                const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+                const containers = Array.from(document.querySelectorAll('.sc-c9e4708a-0, .sc-5c3af813-0, [class*="sc-c9e4708a"], [class*="sc-5c3af813"]'))
+                    .filter(c => isVisible(c) && !c.closest('.sc-e4f4e472-3'));
+                const promptBar = containers.length > 0 ? containers[containers.length - 1] : document.body;
+
+                const agentBtn = promptBar.querySelector('button.sc-59223abb-3, button[class*="59223abb"]')
+                    || Array.from(promptBar.querySelectorAll('button')).find(b => isVisible(b) && (b.innerText || b.textContent || '').trim() === 'Agent');
+
+                if (!agentBtn) return null;
+
+                const isPressedAttr = agentBtn.getAttribute('aria-pressed') === 'true';
+                const hasActiveClass = agentBtn.className.includes('bdRbOx') || (!agentBtn.className.includes('dmZGYv') && agentBtn.className.includes('sc-59223abb-3'));
+                const style = window.getComputedStyle(agentBtn);
+                const isWhiteBg = style.backgroundColor.includes('255') || style.backgroundColor.includes('240') || style.color === 'rgb(0, 0, 0)';
+
+                const isCurrentlyOn = isPressedAttr || (hasActiveClass && isWhiteBg);
+
+                if (isCurrentlyOn) {
+                    return { isPressed: true };
+                }
+
+                const r = agentBtn.getBoundingClientRect();
+                return { isPressed: false, cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2) };
+            });
+
+            if (agentCoords && agentCoords.isPressed) {
+                console.log(`      ✅ Agent mode confirmed ENABLED (attempt ${attempt})`);
+                return true;
+            }
+
+            if (agentCoords && agentCoords.cx > 0 && agentCoords.cy > 0) {
+                console.log(`      🤖 Clicking Agent pill at [${agentCoords.cx}, ${agentCoords.cy}] (attempt ${attempt})...`);
+                try { await page.mouse.click(agentCoords.cx, agentCoords.cy); } catch {}
+                await page.waitForTimeout(600);
+            } else {
+                await page.evaluate(() => {
+                    const agentBtn = Array.from(document.querySelectorAll('button')).find(b => (b.innerText || '').trim() === 'Agent');
+                    if (agentBtn) agentBtn.click();
+                });
+            }
+            await page.waitForTimeout(500);
+        }
+        console.warn(`      ⚠️ Agent mode pill state check completed.`);
+        return false;
+    }
+
     async _applySettings(page, type, settings = {}) {
         try {
             console.log(`      ⚙️ Applying UI Settings for type="${type}": ${JSON.stringify(settings)}`);
 
-            // ── STEP 1: Enable Agent mode if not already enabled ──────────────────────
-            await page.evaluate(() => {
-                // Find main prompt bar container (sc-c9e4708a-0 or sc-5c3af813-0)
-                const containers = Array.from(document.querySelectorAll('.sc-c9e4708a-0, .sc-5c3af813-0, [class*="sc-c9e4708a"], [class*="sc-5c3af813"]'))
-                    .filter(c => c.offsetWidth > 0 && c.offsetHeight > 0 && !c.closest('.sc-e4f4e472-3'));
-                const promptBar = containers.length > 0 ? containers[containers.length - 1] : document.body;
-
-                const agentBtn = promptBar.querySelector('button.sc-59223abb-3, button[class*="59223abb"]')
-                    || Array.from(promptBar.querySelectorAll('button')).find(b => (b.innerText || b.textContent || '').trim() === 'Agent');
-
-                if (agentBtn && agentBtn.getAttribute('aria-pressed') !== 'true') {
-                    console.log('[AgentBtn] Clicking Agent pill to enable agent mode...');
-                    if (window.__highlight) window.__highlight(agentBtn);
-                    agentBtn.click();
-                }
-            });
-            await page.waitForTimeout(600);
+            // ── STEP 1: Always Ensure Agent Mode Pill is Turned ON ────────────────────
+            await this._ensureAgentModeEnabled(page);
 
             // ── STEP 2: Find & Click Settings (tune) Button in Bottom Prompt Bar ───
             let panelOpened = await page.evaluate(() => {
@@ -615,6 +650,18 @@ export class GoogleFxFlowTool extends BaseTool {
                             });
                         }
 
+                        if (!btn) {
+                            const allBtns = Array.from(document.querySelectorAll('button')).filter(isValidSettingsTarget);
+                            btn = allBtns.find(b => {
+                                if (!isVisible(b)) return false;
+                                const txt = (b.innerText || b.textContent || '').toLowerCase();
+                                const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+                                const hasTuneIcon = Array.from(b.querySelectorAll('i, [class*="google-symbols"]'))
+                                    .some(i => (i.textContent || '').trim() === 'tune' || (i.textContent || '').trim() === 'settings');
+                                return hasTuneIcon || txt.includes('settings') || aria.includes('settings') || txt.includes('tune');
+                            });
+                        }
+
                         if (btn) {
                             if (window.__highlight) window.__highlight(btn);
                             btn.scrollIntoView({ block: 'center', inline: 'nearest' });
@@ -630,9 +677,11 @@ export class GoogleFxFlowTool extends BaseTool {
                             await page.mouse.click(coords.cx, coords.cy);
                         } catch {}
                     } else {
-                        console.warn(`      ⚠️ Could not find Settings tune button, attempting DOM click...`);
+                        console.warn(`      ⚠️ Could not find Settings tune button via coordinates, attempting DOM click...`);
                         await page.evaluate(() => {
-                            const tuneBtn = document.querySelector('button.sc-c4e423a0-1:not(.sc-c4e423a0-2):not(.sc-c4e423a0-3)');
+                            const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+                            const tuneBtn = document.querySelector('button.sc-c4e423a0-1:not(.sc-c4e423a0-2):not(.sc-c4e423a0-3)')
+                                || Array.from(document.querySelectorAll('button')).find(b => isVisible(b) && ((b.innerText || '').includes('Settings') || Array.from(b.querySelectorAll('i')).some(i => (i.textContent||'').trim()==='tune')));
                             if (tuneBtn) tuneBtn.click();
                         });
                     }
