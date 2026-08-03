@@ -14,7 +14,29 @@ const generateSchema = Joi.object({
         'string.max': 'Prompt must be 5000 characters or less',
         'any.required': 'prompt field is required',
     }),
-    type: Joi.string().valid('video', 'image').optional().default('video'),
+    type: Joi.string().valid('video', 'image', 'avatar_video').optional().default('video'),
+    settings: Joi.object().optional().default({}),
+    mediaUrl: Joi.string().uri().optional().allow(null, '').messages({
+        'string.uri': 'mediaUrl must be a valid URL',
+    }),
+    imageUrl: Joi.string().uri().optional().allow(null, '').messages({
+        'string.uri': 'imageUrl must be a valid URL',
+    }),
+    avatarName: Joi.string().optional().allow(null, '').messages({
+        'string.base': 'avatarName must be a string',
+    }),
+}).unknown(true);
+
+const generateAvatarSchema = Joi.object({
+    prompt: Joi.string().min(1).max(5000).required().messages({
+        'string.empty': 'Prompt cannot be empty',
+        'string.max': 'Prompt must be 5000 characters or less',
+        'any.required': 'prompt field is required',
+    }),
+    type: Joi.string().valid('video', 'avatar_video').optional().default('avatar_video'),
+    avatarName: Joi.string().optional().default('me').messages({
+        'string.base': 'avatarName must be a string',
+    }),
     settings: Joi.object().optional().default({}),
     mediaUrl: Joi.string().uri().optional().allow(null, '').messages({
         'string.uri': 'mediaUrl must be a valid URL',
@@ -40,7 +62,7 @@ const handleGenerate = async (req, res) => {
         });
     }
 
-    const { prompt, type, settings } = value;
+    const { prompt, type, settings, avatarName } = value;
     const mediaUrl = value.mediaUrl || value.imageUrl || null;
     const itemId = `gen_${uuidv4().replace(/-/g, '').substring(0, 12)}`;
 
@@ -56,6 +78,7 @@ const handleGenerate = async (req, res) => {
             settings,
             mediaUrl,
             imageUrl: mediaUrl,
+            avatarName: avatarName || null,
             status: 'pending',
             result: {
                 videoUrl: null,
@@ -80,6 +103,7 @@ const handleGenerate = async (req, res) => {
             settings,
             mediaUrl,
             imageUrl: mediaUrl,
+            avatarName: avatarName || null,
         });
 
         return res.status(202).json({
@@ -91,6 +115,7 @@ const handleGenerate = async (req, res) => {
             settings,
             mediaUrl,
             imageUrl: mediaUrl,
+            avatarName: avatarName || null,
             message: `Generation job queued successfully. Check status at /api/fx-flow/status/${itemId}`,
             statusUrl: `/api/fx-flow/status/${itemId}`,
             request_id: requestId,
@@ -105,6 +130,93 @@ const handleGenerate = async (req, res) => {
     }
 };
 
+/**
+ * POST /api/fx-flow/generate-avatar-video
+ * Submits a new avatar video generation job (uploads reference media if provided + selects account avatar "me")
+ */
+const handleGenerateAvatarVideo = async (req, res) => {
+    const requestId = req.requestId;
+
+    const { error, value } = generateAvatarSchema.validate(req.body);
+    if (error) {
+        return res.status(400).json({
+            success: false,
+            error: error.details[0].message,
+            request_id: requestId,
+        });
+    }
+
+    const { prompt, settings } = value;
+    const type = value.type || 'avatar_video';
+    const avatarName = value.avatarName || 'me';
+    const mediaUrl = value.mediaUrl || value.imageUrl || null;
+    const itemId = `gen_${uuidv4().replace(/-/g, '').substring(0, 12)}`;
+
+    logger.info(`[FxFlowRoute] [${requestId}] New avatar video request queued (avatarName: "${avatarName}"): "${prompt.substring(0, 60)}..." (itemId: ${itemId})`);
+
+    try {
+        const jobsCol = getJobsCollection();
+        const now = new Date();
+        const jobDoc = {
+            itemId,
+            type,
+            prompt,
+            settings,
+            mediaUrl,
+            imageUrl: mediaUrl,
+            avatarName,
+            status: 'pending',
+            result: {
+                videoUrl: null,
+                imageUrl: null,
+                mediaUrls: [],
+                text: '',
+                rawHtml: '',
+            },
+            error: null,
+            durationMs: 0,
+            createdAt: now,
+            updatedAt: now,
+        };
+
+        await jobsCol.insertOne(jobDoc);
+
+        // Add to background in-memory queue
+        generationQueue.addJob({
+            itemId,
+            type,
+            prompt,
+            settings,
+            mediaUrl,
+            imageUrl: mediaUrl,
+            avatarName,
+        });
+
+        return res.status(202).json({
+            success: true,
+            itemId,
+            status: 'pending',
+            type,
+            prompt,
+            avatarName,
+            settings,
+            mediaUrl,
+            imageUrl: mediaUrl,
+            message: `Avatar video generation job queued successfully. Check status at /api/fx-flow/status/${itemId}`,
+            statusUrl: `/api/fx-flow/status/${itemId}`,
+            request_id: requestId,
+        });
+    } catch (err) {
+        logger.error(`[FxFlowRoute] [${requestId}] Avatar DB/Queue Error:`, err);
+        return res.status(500).json({
+            success: false,
+            error: err.message || 'Failed to enqueue avatar video generation job',
+            request_id: requestId,
+        });
+    }
+};
+
+router.post('/generate-avatar-video', handleGenerateAvatarVideo);
 router.post('/generate', handleGenerate);
 router.post('/', handleGenerate);
 
@@ -139,6 +251,7 @@ router.get('/status/:itemId', async (req, res) => {
             progressStatus: job.progressStatus || (job.status === 'completed' ? 'Completed' : job.status),
             type: job.type,
             prompt: job.prompt,
+            avatarName: job.avatarName || null,
             settings: job.settings,
             mediaUrl: job.mediaUrl || job.imageUrl || null,
             r2Url,

@@ -2,7 +2,7 @@
 	"info": {
 		"_postman_id": "google-fx-flow-automation-collection-prod",
 		"name": "Google FX Flow Automation API (Production - gen.socialversal.online)",
-		"description": "Postman Collection for Google FX Flow Video & Image Generation API running on VPS (gen.socialversal.online).\n\n**Base URL:** `https://gen.socialversal.online`\n\n**Settings Notes:**\n- `count`: plain number — 1, 2, 3, or 4\n- `duration`: plain number in seconds — 4, 6, 8, or 10 (video only)\n- `aspectRatio`: \"16:9\", \"9:16\", \"1:1\", \"4:3\", \"3:4\"\n- `model`: exact name e.g. \"Nano Banana 2 Lite\", \"Nano Banana 2\", \"Nano Banana Pro\", \"Imagen 3\", \"Omni Flash\", \"Veo 2\"",
+		"description": "Postman Collection for Google FX Flow Video & Image Generation API running on VPS (gen.socialversal.online).\n\n**Base URL:** `https://gen.socialversal.online`\n\n**Endpoints:**\n- `POST /api/fx-flow/generate-avatar-video`: Generate video using uploaded image & account avatar ('me')\n- `POST /api/fx-flow/generate`: Standard video/image generation\n- `GET /api/fx-flow/status/:itemId`: Poll job progress & fetch video/image results\n\n**Settings Notes:**\n- `count`: plain number — 1, 2, 3, or 4\n- `duration`: plain number in seconds — 4, 6, 8, or 10 (video only)\n- `aspectRatio`: \"16:9\", \"9:16\", \"1:1\", \"4:3\", \"3:4\"\n- `model`: exact name e.g. \"Nano Banana 2 Lite\", \"Nano Banana 2\", \"Nano Banana Pro\", \"Imagen 3\", \"Omni Flash\", \"Veo 2\"",
 		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
 	},
 	"variable": [
@@ -77,6 +77,40 @@
 					"path": ["api", "fx-flow", "generate"]
 				},
 				"description": "Submit a video generation job.\n\n**Settings:**\n- `aspectRatio`: \"16:9\" | \"9:16\" | \"1:1\" | \"4:3\" | \"3:4\"\n- `model`: \"Omni Flash\" | \"Veo 2\"\n- `duration`: 4 | 6 | 8 | 10 (seconds, number)\n- `count`: 1 | 2 | 3 | 4 (number, not x1)\n\nReturns `itemId` — use it to poll `/status/:itemId`."
+			},
+			"response": []
+		},
+		{
+			"name": "3b. Generate Avatar Video (User Image + Account Avatar)",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"var json = pm.response.json();",
+							"if (json.itemId) { pm.collectionVariables.set('itemId', json.itemId); }",
+							"pm.test('Response has itemId', () => pm.expect(json.itemId).to.be.a('string'));"
+						],
+						"type": "text/javascript"
+					}
+				}
+			],
+			"request": {
+				"method": "POST",
+				"header": [
+					{ "key": "Content-Type", "value": "application/json", "type": "text" }
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"type\": \"avatar_video\",\n  \"prompt\": \"Avatar presenting a tech demonstration in a modern studio setting\",\n  \"avatarName\": \"me\",\n  \"imageUrl\": \"https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=500\",\n  \"settings\": {\n    \"aspectRatio\": \"16:9\",\n    \"model\": \"Omni Flash\",\n    \"duration\": 8\n  }\n}",
+					"options": { "raw": { "language": "json" } }
+				},
+				"url": {
+					"raw": "{{baseUrl}}/api/fx-flow/generate-avatar-video",
+					"host": ["{{baseUrl}}"],
+					"path": ["api", "fx-flow", "generate-avatar-video"]
+				},
+				"description": "Submit an avatar video generation job.\n\n**Parameters:**\n- `prompt`: Text description for video\n- `avatarName`: Name of account avatar to select (defaults to \"me\")\n- `imageUrl` / `mediaUrl`: Optional reference image URL to upload into prompt\n- `settings`: `aspectRatio`, `model`, `duration`"
 			},
 			"response": []
 		},
