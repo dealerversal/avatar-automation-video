@@ -18,10 +18,14 @@ let isInitializing = false;
 
 export async function closeSharedContext() {
     if (sharedContext) {
-        try {
-            await sharedContext.close();
-        } catch (e) {}
+        const ctxToClose = sharedContext;
         sharedContext = null;
+        try {
+            await ctxToClose.close();
+            console.log('      🚪 Browser instance closed completely.');
+        } catch (e) {
+            console.warn(`      ⚠️ Warning closing shared browser context: ${e.message}`);
+        }
     }
 }
 
@@ -255,20 +259,22 @@ export class GoogleFxFlowTool extends BaseTool {
         if (effectiveAvatarName) console.log(`👤  Avatar Name: ${effectiveAvatarName}`);
         logger.info(`[GoogleFxFlowTool] Executing (${type}) [${itemId}]: "${cleanPrompt.substring(0, 80)}..."`);
 
-        console.log(`\n[1/5] 🚀 Getting shared browser context...`);
-        let context = await this._getSharedContext();
-        let page;
+        let context = null;
+        let page = null;
 
         try {
-            page = await context.newPage();
-        } catch (err) {
-            console.warn(`[GoogleFX] ⚠️ Context error, retrying...`);
-            sharedContext = null;
+            console.log(`\n[1/5] 🚀 Getting shared browser context...`);
             context = await this._getSharedContext();
-            page = await context.newPage();
-        }
 
-        try {
+            try {
+                page = await context.newPage();
+            } catch (err) {
+                console.warn(`[GoogleFX] ⚠️ Context error, retrying...`);
+                await closeSharedContext();
+                context = await this._getSharedContext();
+                page = await context.newPage();
+            }
+
             // 1. Navigate to Google FX Flow
             console.log(`\n[2/6] 🌍 Navigating to ${GOOGLE_FX_URL} ...`);
             await page.goto(GOOGLE_FX_URL, { waitUntil: 'domcontentloaded', timeout: config.browser.timeoutMs });
@@ -339,11 +345,6 @@ export class GoogleFxFlowTool extends BaseTool {
             console.log(`\n[6/7] ⚙️ Opening Agent Settings and applying configuration...`);
             await this._applyAgentSettings(page, actualGenType, settings);
 
-            // NOTE: _applyResultFilter() is intentionally NOT called here.
-            // Calling it right after upload would fire an Escape keypress that closes
-            // the upload panel while it is still transitioning → breaks the upload flow.
-            // The filter is applied inside _extractResult() before polling begins.
-
             // Wait for prompt bar to fully settle after upload + settings,
             // then snapshot ALL pre-existing media URLs (to exclude from result polling).
             await page.waitForTimeout(3000);
@@ -395,20 +396,18 @@ export class GoogleFxFlowTool extends BaseTool {
             };
         } catch (err) {
             console.error(`[GoogleFX] ❌ Execution error: ${err.message}`);
-            sharedContext = null;
             throw err;
         } finally {
             if (page && !page.isClosed()) {
                 try {
                     await page.close();
-                    console.log(`      🔒 Browser tab closed cleanly after job completion.`);
+                    console.log(`      🔒 Browser tab closed cleanly.`);
                 } catch (closeErr) {
                     console.warn(`      ⚠️ Warning closing browser tab: ${closeErr.message}`);
                 }
             }
             try {
                 await closeSharedContext();
-                console.log(`      🚪 Browser instance closed completely after request completion.`);
             } catch (closeContextErr) {
                 console.warn(`      ⚠️ Warning closing shared browser context: ${closeContextErr.message}`);
             }
