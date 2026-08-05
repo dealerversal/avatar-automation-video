@@ -102,13 +102,9 @@ const handleGenerateAvatarVideo = async (req, res) => {
             itemId,
             status: 'pending',
             type,
-            prompt,
             avatarName,
+            genratedUrl: '',
             settings,
-            mediaUrl,
-            imageUrl: mediaUrl,
-            message: `Avatar video generation job queued successfully. Check status at /api/fx-flow/status/${itemId}`,
-            statusUrl: `/api/fx-flow/status/${itemId}`,
             request_id: requestId,
         });
     } catch (err) {
@@ -124,80 +120,56 @@ const handleGenerateAvatarVideo = async (req, res) => {
 router.post('/generate-avatar-video', handleGenerateAvatarVideo);
 
 /**
+ * GET /api/fx-flow/status
  * GET /api/fx-flow/status/:itemId
- * Checks job status and retrieves results from MongoDB
+ * Checks job status and retrieves results from MongoDB (supports 'latest' or omit itemId for latest job)
  */
-router.get('/status/:itemId', async (req, res) => {
+router.get(['/status', '/status/:itemId'], async (req, res) => {
     const { itemId } = req.params;
     const requestId = req.requestId;
 
     try {
         const jobsCol = getJobsCollection();
-        const job = await jobsCol.findOne({ itemId });
+        let job = null;
+
+        if (itemId && itemId !== 'latest') {
+            job = await jobsCol.findOne({ itemId });
+        } else {
+            job = await jobsCol.find({}).sort({ updatedAt: -1, createdAt: -1 }).limit(1).next();
+        }
 
         if (!job) {
             return res.status(404).json({
                 success: false,
-                error: `Job with itemId "${itemId}" not found`,
+                error: itemId ? `Job with itemId "${itemId}" not found` : 'No generation jobs found in database',
                 request_id: requestId,
             });
         }
 
-        const r2Url = job.result?.r2Url || null;
-        const r2Key = job.result?.r2Key || null;
+        const genratedUrl = job.result?.r2Url || job.result?.videoUrl || job.r2Url || '';
 
-        return res.json({
+        const responseObj = {
             success: true,
             itemId: job.itemId,
             status: job.status,
-            progressPct: job.progressPct || (job.status === 'completed' ? 100 : 0),
-            progressStatus: job.progressStatus || (job.status === 'completed' ? 'Completed' : job.status),
             type: job.type,
-            prompt: job.prompt,
-            avatarName: job.avatarName || null,
+            avatarName: job.avatarName || 'me',
+            genratedUrl,
             settings: job.settings,
-            mediaUrl: job.mediaUrl || job.imageUrl || null,
-            r2Url,
-            r2Key,
-            result: job.result,
-            error: job.error,
-            durationMs: job.durationMs,
-            createdAt: job.createdAt,
-            updatedAt: job.updatedAt,
             request_id: requestId,
-        });
+        };
+
+        if (job.status === 'failed' && job.error) {
+            responseObj.error = job.error;
+        }
+
+        return res.json(responseObj);
     } catch (err) {
         logger.error(`[FxFlowRoute] Status fetch error:`, err);
         return res.status(500).json({
             success: false,
             error: err.message || 'Internal server error fetching job status',
             request_id: requestId,
-        });
-    }
-});
-
-/**
- * GET /api/fx-flow/jobs
- * Lists recent generation jobs from MongoDB
- */
-router.get('/jobs', async (req, res) => {
-    try {
-        const jobsCol = getJobsCollection();
-        const jobs = await jobsCol
-            .find({}, { projection: { 'result.rawHtml': 0 } })
-            .sort({ createdAt: -1 })
-            .limit(50)
-            .toArray();
-
-        res.json({
-            success: true,
-            count: jobs.length,
-            jobs,
-        });
-    } catch (err) {
-        res.status(500).json({
-            success: false,
-            error: err.message,
         });
     }
 });

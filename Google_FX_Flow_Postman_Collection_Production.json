@@ -2,7 +2,7 @@
 	"info": {
 		"_postman_id": "google-fx-flow-automation-collection-prod",
 		"name": "Google FX Flow Automation API (Production - gen.socialversal.online)",
-		"description": "Postman Collection for Google FX Flow Avatar Video Generation API running on VPS.\n\n**Base URL:** `https://gen.socialversal.online`\n\n**Available Endpoints:**\n- `POST /api/fx-flow/generate-avatar-video` → Main generation endpoint (only one)\n- `GET /api/fx-flow/status/:itemId` → Poll job status & fetch result\n- `GET /api/fx-flow/jobs` → List recent 50 jobs\n\n**Full Automation Flow (in order):**\n1. Navigate to Google FX Flow → Create New Project\n2. Enable Agent mode (pill button)\n3. Click Expand button → opens right-side Agent panel\n4. Add account avatar (\"me\") to prompt via + button\n5. Upload reference image (mediaUrl/imageUrl) → wait for upload → add to prompt\n6. Open Agent Settings (tune icon) → set aspectRatio, model, duration, confirm=Never → Save\n7. Type prompt + Submit → Poll for video generation result\n\n**Settings Notes:**\n- `aspectRatio`: \"9:16\", \"16:9\", \"1:1\", \"4:3\", \"3:4\"\n- `model`: \"Omni Flash\" (default) | \"Veo 3.1 - Lite\" | \"Veo 3.1 - Fast\" | \"Veo 3.1 - Quality\"\n- `duration`: 4 | 6 | 8 | 10 (seconds, number — NOT string)\n- `avatarName`: \"me\" (uses the logged-in account avatar)",
+		"description": "Postman Collection for Google FX Flow Avatar Video Generation API running on VPS.\n\n**Base URL:** `https://gen.socialversal.online`\n\n**Available Endpoints:**\n- `POST /api/fx-flow/generate-avatar-video` → Main generation endpoint (only one)\n- `GET /api/fx-flow/status/:itemId` → Poll job status & fetch result\n\n**Full Automation Flow (in order):**\n1. Navigate to Google FX Flow → Create New Project\n2. Enable Agent mode (pill button)\n3. Click Expand button → opens right-side Agent panel\n4. Add account avatar (\"me\") to prompt via + button\n5. Upload reference image (mediaUrl/imageUrl) → wait for upload → add to prompt\n6. Open Agent Settings (tune icon) → set aspectRatio, model, duration, confirm=Never → Save\n7. Type prompt + Submit → Poll for video generation result\n\n**Settings Notes:**\n- `aspectRatio`: \"9:16\", \"16:9\", \"1:1\", \"4:3\", \"3:4\"\n- `model`: \"Omni Flash\" (default) | \"Veo 3.1 - Lite\" | \"Veo 3.1 - Fast\" | \"Veo 3.1 - Quality\"\n- `duration`: 4 | 6 | 8 | 10 (seconds, number — NOT string)\n- `avatarName`: \"me\" (uses the logged-in account avatar)",
 		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
 	},
 	"variable": [
@@ -19,45 +19,7 @@
 	],
 	"item": [
 		{
-			"name": "1. Health Check",
-			"request": {
-				"method": "GET",
-				"header": [],
-				"url": {
-					"raw": "{{baseUrl}}/health",
-					"host": [
-						"{{baseUrl}}"
-					],
-					"path": [
-						"health"
-					]
-				},
-				"description": "Check if Express server, MongoDB connection, and Google FX Flow browser tool are online and ready."
-			},
-			"response": []
-		},
-		{
-			"name": "2. Session Status Check",
-			"request": {
-				"method": "GET",
-				"header": [],
-				"url": {
-					"raw": "{{baseUrl}}/api/session/status",
-					"host": [
-						"{{baseUrl}}"
-					],
-					"path": [
-						"api",
-						"session",
-						"status"
-					]
-				},
-				"description": "Check Google FX Flow browser profile authentication status on VPS. Must be logged in before generating."
-			},
-			"response": []
-		},
-		{
-			"name": "3. Generate Avatar Video",
+			"name": "1. Generate Avatar Video",
 			"event": [
 				{
 					"listen": "test",
@@ -107,56 +69,7 @@
 			"response": []
 		},
 		{
-			"name": "3. Generate Avatar Video (Minimal - Prompt Only)",
-			"event": [
-				{
-					"listen": "test",
-					"script": {
-						"exec": [
-							"var json = pm.response.json();",
-							"if (json.itemId) { pm.collectionVariables.set('itemId', json.itemId); console.log('itemId saved:', json.itemId); }",
-							"pm.test('Status 202 Accepted', () => pm.response.to.have.status(202));",
-							"pm.test('Response has itemId', () => pm.expect(json.itemId).to.be.a('string'));"
-						],
-						"type": "text/javascript"
-					}
-				}
-			],
-			"request": {
-				"method": "POST",
-				"header": [
-					{
-						"key": "Content-Type",
-						"value": "application/json",
-						"type": "text"
-					}
-				],
-				"body": {
-					"mode": "raw",
-					"raw": "{\n  \"prompt\": \"Avatar speaking confidently to camera in a clean studio background, professional and natural\",\n  \"avatarName\": \"me\",\n  \"settings\": {\n    \"aspectRatio\": \"9:16\",\n    \"model\": \"Omni Flash\",\n    \"duration\": 8\n  }\n}",
-					"options": {
-						"raw": {
-							"language": "json"
-						}
-					}
-				},
-				"url": {
-					"raw": "{{baseUrl}}/api/fx-flow/generate-avatar-video",
-					"host": [
-						"{{baseUrl}}"
-					],
-					"path": [
-						"api",
-						"fx-flow",
-						"generate-avatar-video"
-					]
-				},
-				"description": "Minimal avatar video request — no reference image, just a text prompt and avatar. Good for testing the flow without file upload."
-			},
-			"response": []
-		},
-		{
-			"name": "4. Check Job Status & Result",
+			"name": "2. Check Job Status & Result",
 			"event": [
 				{
 					"listen": "test",
@@ -201,78 +114,6 @@
 					]
 				},
 				"description": "Poll this endpoint after submitting a job to check progress and get the result.\n\n**Status values:**\n- `pending` → job is queued\n- `processing` → browser automation is running\n- `completed` → done! Check `result.videoUrl`, `result.r2Url`, `r2Url`\n- `failed` → check `error` field\n\n**Tip:** Poll every 10–15 seconds. Avatar video generation typically takes 60–180 seconds."
-			},
-			"response": []
-		},
-		{
-			"name": "5. List Recent Jobs",
-			"request": {
-				"method": "GET",
-				"header": [],
-				"url": {
-					"raw": "{{baseUrl}}/api/fx-flow/jobs",
-					"host": [
-						"{{baseUrl}}"
-					],
-					"path": [
-						"api",
-						"fx-flow",
-						"jobs"
-					]
-				},
-				"description": "Returns the 50 most recent generation jobs from MongoDB with their status, prompt, settings, and result URLs. Useful for monitoring and debugging."
-			},
-			"response": []
-		},
-		{
-			"name": "6. Upload Profile Zip (Session Sync)",
-			"request": {
-				"method": "POST",
-				"header": [
-					{
-						"key": "Content-Type",
-						"value": "application/zip",
-						"type": "text"
-					}
-				],
-				"body": {
-					"mode": "file",
-					"file": {
-						"src": ""
-					}
-				},
-				"url": {
-					"raw": "{{baseUrl}}/api/session/upload-zip",
-					"host": [
-						"{{baseUrl}}"
-					],
-					"path": [
-						"api",
-						"session",
-						"upload-zip"
-					]
-				},
-				"description": "Upload a `browser-profile.zip` file to extract and sync the Google session directly on VPS. Use this when the session expires and you need to re-authenticate."
-			},
-			"response": []
-		},
-		{
-			"name": "7. Reset Session Profile",
-			"request": {
-				"method": "POST",
-				"header": [],
-				"url": {
-					"raw": "{{baseUrl}}/api/session/clear",
-					"host": [
-						"{{baseUrl}}"
-					],
-					"path": [
-						"api",
-						"session",
-						"clear"
-					]
-				},
-				"description": "Clear the persistent browser profile directory on VPS. Use when you need to completely reset the session."
 			},
 			"response": []
 		}
