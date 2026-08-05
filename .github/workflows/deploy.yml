@@ -3,7 +3,7 @@ name: Deploy Avatar Automation Video VPS Server
 on:
   push:
     branches:
-      - main
+      - main_new
   workflow_dispatch:
 
 concurrency:
