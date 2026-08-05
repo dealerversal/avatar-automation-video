@@ -406,6 +406,12 @@ export class GoogleFxFlowTool extends BaseTool {
                     console.warn(`      ⚠️ Warning closing browser tab: ${closeErr.message}`);
                 }
             }
+            try {
+                await closeSharedContext();
+                console.log(`      🚪 Browser instance closed completely after request completion.`);
+            } catch (closeContextErr) {
+                console.warn(`      ⚠️ Warning closing shared browser context: ${closeContextErr.message}`);
+            }
         }
     }
 
