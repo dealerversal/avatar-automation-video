@@ -208,7 +208,38 @@ export class GoogleFxFlowTool extends BaseTool {
         return sharedContext;
     }
 
+    _cleanPromptText(input) {
+        if (!input) return '';
+        let str = typeof input === 'string' ? input.trim() : JSON.stringify(input);
+
+        // Handle JSON array or JSON object inputs (e.g. [{"type": "text", "text": "..."}])
+        if ((str.startsWith('[') && str.endsWith(']')) || (str.startsWith('{') && str.endsWith('}'))) {
+            try {
+                const parsed = JSON.parse(str);
+                if (Array.isArray(parsed)) {
+                    const textItem = parsed.find(item => item && (item.text || typeof item === 'string'));
+                    if (textItem) {
+                        return (typeof textItem === 'string' ? textItem : (textItem.text || '')).trim();
+                    }
+                } else if (parsed && typeof parsed === 'object') {
+                    if (parsed.text) return String(parsed.text).trim();
+                    if (parsed.prompt) return this._cleanPromptText(parsed.prompt);
+                }
+            } catch (e) {
+                // Not valid JSON, fall through to regex fallback
+            }
+
+            const textMatch = str.match(/"text"\s*:\s*"((?:[^"\\]|\\.)*)"/s);
+            if (textMatch && textMatch[1]) {
+                return textMatch[1].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\').trim();
+            }
+        }
+
+        return str;
+    }
+
     async execute({ itemId, prompt, type = 'video', settings = {}, mediaUrl = null, imageUrl = null, avatarName = null }) {
+        const cleanPrompt = this._cleanPromptText(prompt);
         const effectiveMediaUrl = mediaUrl || imageUrl || null;
         const effectiveAvatarName = avatarName || (type === 'avatar_video' ? 'me' : null);
         const actualGenType = type === 'avatar_video' ? 'video' : type;
@@ -218,11 +249,11 @@ export class GoogleFxFlowTool extends BaseTool {
         console.log('─'.repeat(60));
         console.log(`🆔  Job ID : ${itemId || 'N/A'}`);
         console.log(`🎬  Type   : ${type.toUpperCase()}`);
-        console.log(`💬  Prompt : "${prompt.substring(0, 100)}${prompt.length > 100 ? '...' : ''}"`);
+        console.log(`💬  Prompt : "${cleanPrompt.substring(0, 100)}${cleanPrompt.length > 100 ? '...' : ''}"`);
         console.log(`⚙️   Settings: ${JSON.stringify(settings)}`);
         if (effectiveMediaUrl) console.log(`🖼️   Media URL: ${effectiveMediaUrl}`);
         if (effectiveAvatarName) console.log(`👤  Avatar Name: ${effectiveAvatarName}`);
-        logger.info(`[GoogleFxFlowTool] Executing (${type}) [${itemId}]: "${prompt.substring(0, 80)}..."`);
+        logger.info(`[GoogleFxFlowTool] Executing (${type}) [${itemId}]: "${cleanPrompt.substring(0, 80)}..."`);
 
         console.log(`\n[1/5] 🚀 Getting shared browser context...`);
         let context = await this._getSharedContext();
@@ -282,43 +313,46 @@ export class GoogleFxFlowTool extends BaseTool {
                 throw new Error('Google session expired after project creation. Please re-login in the browser profile.');
             }
 
-            // 3. Configure Mode (Video/Image) and Settings
-            console.log(`\n[4/6] ⚙️ Configuring generator mode (${actualGenType}) and settings...`);
-            await this._applySettings(page, actualGenType, settings);
+            // 2b. Ensure "All Media" tab is active
+            console.log(`\n[3a/7] 📁 Selecting "All Media" tab...`);
+            await this._ensureAllMediaTab(page);
 
-            // 3b. Step 1: Select account Avatar FIRST if requested
+            // 3. Enable Agent Mode FIRST (hardcoded enabled)
+            console.log(`\n[3b/7] 🤖 Enabling Agent mode...`);
+            await this._enableAgentMode(page);
+
+            // 4. Add account Avatar to prompt
             if (effectiveAvatarName) {
-                console.log(`\n[4b/6] 👤 [STEP 1/2] Selecting Avatar "${effectiveAvatarName}" and adding to prompt...`);
+                console.log(`\n[4/7] 👤 [STEP 1/2] Selecting Avatar "${effectiveAvatarName}" and adding to prompt...`);
                 await this._addAvatarToPrompt(page, effectiveAvatarName);
             }
 
-            // 3c. Step 2: Upload reference media SECOND if mediaUrl provided
+            // 5. Upload reference image/media to prompt
             let uploadedMediaUrls = [];
             if (effectiveMediaUrl) {
-                console.log(`\n[4c/6] 🖼️ [STEP 2/2] Uploading reference media from URL...`);
+                console.log(`\n[5/7] 🖼️ [STEP 2/2] Uploading reference media from URL, waiting for upload to finish...`);
                 uploadedMediaUrls = await this._uploadMediaFromUrl(page, effectiveMediaUrl, itemId);
                 console.log(`      🔒 Uploaded media URLs captured for exclusion: ${uploadedMediaUrls.length}`);
             }
+
+            // 6. Open Agent Settings → configure (aspect ratio, model, duration, Never) → Save
+            console.log(`\n[6/7] ⚙️ Opening Agent Settings and applying configuration...`);
+            await this._applyAgentSettings(page, actualGenType, settings);
 
             // NOTE: _applyResultFilter() is intentionally NOT called here.
             // Calling it right after upload would fire an Escape keypress that closes
             // the upload panel while it is still transitioning → breaks the upload flow.
             // The filter is applied inside _extractResult() before polling begins.
 
-            // 4. Wait for prompt bar to fully settle after upload, then snapshot ALL
-            // pre-existing media URLs. This must happen AFTER the media panel closes
-            // and the thumbnail is stable in the prompt bar.
-            // Any URL in this snapshot will be EXCLUDED from result polling.
-            // IMPORTANT: Increased wait to 5000ms — uploaded video URL may appear in DOM
-            // AFTER panel closes (Google streams/renders the uploaded thumbnail asynchronously).
-            await page.waitForTimeout(5000); // let prompt bar thumbnail + any lazy-loaded uploaded URLs settle
+            // Wait for prompt bar to fully settle after upload + settings,
+            // then snapshot ALL pre-existing media URLs (to exclude from result polling).
+            await page.waitForTimeout(3000);
             const preExistingUrls = await page.evaluate(() => {
                 const urls = new Set();
                 document.querySelectorAll('img[src], video[src], video source[src]').forEach(el => {
                     const src = el.getAttribute('src') || '';
                     if (src && !src.startsWith('data:')) urls.add(src);
                 });
-                // Also capture blob URLs and any src from prompt bar attachments
                 document.querySelectorAll('[src]').forEach(el => {
                     const src = el.getAttribute('src') || '';
                     if (src && (src.startsWith('blob:') || src.startsWith('http'))) urls.add(src);
@@ -327,17 +361,18 @@ export class GoogleFxFlowTool extends BaseTool {
             });
             console.log(`      📸 Pre-submit snapshot: ${preExistingUrls.length} existing media URLs captured (will be excluded from result)`);
 
-            // 5. Enter Prompt & Submit
-            console.log(`\n[5/6] ⌨️ Submitting prompt into generation bar...`);
-            const postSubmitUrls = await this._submitPrompt(page, prompt);
+            // 7. Enter Prompt & Submit
+            console.log(`\n[7/7] ⌨️ Submitting prompt into generation bar...`);
+            this._lastPrompt = cleanPrompt; // store for cancellation retry in _extractResult
+            const postSubmitUrls = await this._submitPrompt(page, cleanPrompt);
             console.log(`      ✅ Prompt submitted!`);
 
             // Merge: preExisting + post-submit snapshot + explicitly captured uploaded URLs
             const allExcludedUrls = Array.from(new Set([...preExistingUrls, ...(postSubmitUrls || []), ...uploadedMediaUrls]));
             console.log(`      🔒 Total excluded reference media URLs: ${allExcludedUrls.length} (preExisting=${preExistingUrls.length}, postSubmit=${(postSubmitUrls||[]).length}, uploadedCapture=${uploadedMediaUrls.length})`);
 
-            // 6. Poll and Extract Results & Download Local Asset
-            console.log(`\n[6/6] ⏳ Polling for ${type} generation completion, downloading asset & saving locally...`);
+            // 8. Poll and Extract Results & Download Local Asset
+            console.log(`\n[8/8] ⏳ Polling for ${type} generation completion, downloading asset & saving locally...`);
             const result = await this._extractResult(page, type, itemId, allExcludedUrls);
 
             const totalMs = Date.now() - execStart;
@@ -353,7 +388,7 @@ export class GoogleFxFlowTool extends BaseTool {
             return {
                 success: true,
                 type,
-                prompt,
+                prompt: cleanPrompt,
                 settings,
                 ...result,
                 duration_ms: totalMs,
@@ -531,64 +566,244 @@ export class GoogleFxFlowTool extends BaseTool {
         console.log(`      🧹 Overlay dismissal complete`);
     }
 
-    async _ensureAgentModeEnabled(page) {
-        console.log(`      🤖 Ensuring Agent mode pill is turned ON (white active pill background)...`);
-        for (let attempt = 1; attempt <= 3; attempt++) {
-            const agentCoords = await page.evaluate(() => {
-                const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
-                const containers = Array.from(document.querySelectorAll('.sc-c9e4708a-0, .sc-5c3af813-0, [class*="sc-c9e4708a"], [class*="sc-5c3af813"]'))
-                    .filter(c => isVisible(c) && !c.closest('.sc-e4f4e472-3'));
-                const promptBar = containers.length > 0 ? containers[containers.length - 1] : document.body;
-
-                const agentBtn = promptBar.querySelector('button.sc-59223abb-3, button[class*="59223abb"]')
-                    || Array.from(promptBar.querySelectorAll('button')).find(b => isVisible(b) && (b.innerText || b.textContent || '').trim() === 'Agent');
-
-                if (!agentBtn) return null;
-
-                const isPressedAttr = agentBtn.getAttribute('aria-pressed') === 'true';
-                const hasActiveClass = agentBtn.className.includes('bdRbOx') || (!agentBtn.className.includes('dmZGYv') && agentBtn.className.includes('sc-59223abb-3'));
-                const style = window.getComputedStyle(agentBtn);
-                const isWhiteBg = style.backgroundColor.includes('255') || style.backgroundColor.includes('240') || style.color === 'rgb(0, 0, 0)';
-
-                const isCurrentlyOn = isPressedAttr || (hasActiveClass && isWhiteBg);
-
-                if (isCurrentlyOn) {
-                    return { isPressed: true };
-                }
-
-                const r = agentBtn.getBoundingClientRect();
-                return { isPressed: false, cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2) };
+    /**
+     * Ensures that the "All Media" tab is selected in the left navigation sidebar.
+     */
+    async _ensureAllMediaTab(page) {
+        console.log(`      📁 Ensuring "All Media" tab is selected...`);
+        const clicked = await page.evaluate(() => {
+            const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+            const buttons = Array.from(document.querySelectorAll('button'));
+            const allMediaBtn = buttons.find(b => {
+                if (!isVisible(b)) return false;
+                const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
+                return txt.includes('all media');
             });
-
-            if (agentCoords && agentCoords.isPressed) {
-                console.log(`      ✅ Agent mode confirmed ENABLED (attempt ${attempt})`);
-                return true;
+            if (allMediaBtn) {
+                const cls = allMediaBtn.className || '';
+                const isSelected = cls.includes('jcMEtI') ||
+                                   allMediaBtn.getAttribute('aria-selected') === 'true' ||
+                                   allMediaBtn.getAttribute('data-state') === 'active';
+                if (!isSelected) {
+                    if (window.__highlight) window.__highlight(allMediaBtn);
+                    allMediaBtn.click();
+                    return true;
+                }
+                return 'already_active';
             }
+            return false;
+        });
 
-            if (agentCoords && agentCoords.cx > 0 && agentCoords.cy > 0) {
-                console.log(`      🤖 Clicking Agent pill at [${agentCoords.cx}, ${agentCoords.cy}] (attempt ${attempt})...`);
-                try { await page.mouse.click(agentCoords.cx, agentCoords.cy); } catch {}
-                await page.waitForTimeout(600);
-            } else {
-                await page.evaluate(() => {
-                    const agentBtn = Array.from(document.querySelectorAll('button')).find(b => (b.innerText || '').trim() === 'Agent');
-                    if (agentBtn) agentBtn.click();
-                });
-            }
-            await page.waitForTimeout(500);
+        if (clicked === true) {
+            console.log(`      ✅ Switched to "All Media" tab`);
+            await page.waitForTimeout(1000);
+        } else if (clicked === 'already_active') {
+            console.log(`      ✅ "All Media" tab is already active`);
+        } else {
+            console.warn(`      ⚠️ Could not locate "All Media" tab button in sidebar`);
         }
-        console.warn(`      ⚠️ Agent mode pill state check completed.`);
-        return false;
     }
 
-    async _applySettings(page, type, settings = {}) {
+    /**
+     * Enables the Agent mode pill in the prompt bar (hardcoded enabled).
+     * Must be called BEFORE opening the media panel (avatar / upload),
+     * because Agent mode changes the prompt bar controls.
+     */
+    async _enableAgentMode(page) {
+        console.log(`      🤖 Enabling Agent mode pill (hardcoded)...`);
+        await page.evaluate(() => {
+            const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+            const containers = Array.from(document.querySelectorAll(
+                '.sc-c9e4708a-0, .sc-5c3af813-0, [class*="sc-c9e4708a"], [class*="sc-5c3af813"]'
+            )).filter(c => isVisible(c) && !c.closest('.sc-e4f4e472-3'));
+            const promptBar = containers.length > 0 ? containers[containers.length - 1] : document.body;
+
+            const agentBtn = promptBar.querySelector('button.sc-59223abb-3, button[class*="59223abb"]')
+                || Array.from(promptBar.querySelectorAll('button')).find(b =>
+                    (b.innerText || b.textContent || '').trim() === 'Agent'
+                );
+
+            if (agentBtn) {
+                const cls = agentBtn.className || '';
+                const isOn = cls.includes('bdRbOx')
+                    || agentBtn.getAttribute('aria-pressed') === 'true'
+                    || agentBtn.getAttribute('aria-checked') === 'true'
+                    || agentBtn.getAttribute('data-state') === 'on';
+                if (!isOn) {
+                    console.log('[AgentMode] Clicking Agent pill to enable agent mode...');
+                    if (window.__highlight) window.__highlight(agentBtn);
+                    agentBtn.click();
+                    agentBtn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                } else {
+                    console.log('[AgentMode] Agent mode already enabled.');
+                }
+            } else {
+                console.warn('[AgentMode] Agent pill button not found in prompt bar.');
+            }
+        });
+        await page.waitForTimeout(1200);
+
+        // Verify agent mode is on
+        const isAgentOn = await page.evaluate(() => {
+            const containers = Array.from(document.querySelectorAll(
+                '.sc-c9e4708a-0, .sc-5c3af813-0, [class*="sc-c9e4708a"], [class*="sc-5c3af813"]'
+            )).filter(c => c.offsetWidth > 0 && !c.closest('.sc-e4f4e472-3'));
+            const promptBar = containers.length > 0 ? containers[containers.length - 1] : document.body;
+            const agentBtn = promptBar.querySelector('button.sc-59223abb-3, button[class*="59223abb"]')
+                || Array.from(promptBar.querySelectorAll('button')).find(b =>
+                    (b.innerText || b.textContent || '').trim() === 'Agent'
+                );
+            if (!agentBtn) return false;
+            const cls = agentBtn.className || '';
+            return cls.includes('bdRbOx')
+                || agentBtn.getAttribute('aria-pressed') === 'true'
+                || agentBtn.getAttribute('aria-checked') === 'true'
+                || agentBtn.getAttribute('data-state') === 'on';
+        });
+
+        if (isAgentOn) {
+            console.log(`      ✅ Agent mode confirmed ON`);
+        } else {
+            console.warn(`      ⚠️ Agent mode may not be active — attempting fallback click`);
+            const coords = await page.evaluate(() => {
+                const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+                const containers = Array.from(document.querySelectorAll(
+                    '.sc-c9e4708a-0, .sc-5c3af813-0, [class*="sc-c9e4708a"], [class*="sc-5c3af813"]'
+                )).filter(c => isVisible(c) && !c.closest('.sc-e4f4e472-3'));
+                const promptBar = containers.length > 0 ? containers[containers.length - 1] : document.body;
+                const agentBtn = promptBar.querySelector('button.sc-59223abb-3, button[class*="59223abb"]')
+                    || Array.from(promptBar.querySelectorAll('button')).find(b =>
+                        (b.innerText || b.textContent || '').trim() === 'Agent'
+                    );
+                if (agentBtn) {
+                    agentBtn.scrollIntoView({ block: 'center' });
+                    const r = agentBtn.getBoundingClientRect();
+                    return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2) };
+                }
+                return null;
+            });
+            if (coords) {
+                await page.mouse.click(coords.cx, coords.cy);
+                await page.waitForTimeout(800);
+            }
+        }
+
+        // After Agent mode is ON, click the "Expand" (expand_content) button if visible
+        await this._clickExpandButton(page);
+    }
+
+    /**
+     * Clicks the "Expand" (expand_content icon) button in the prompt bar if visible.
+     * Opens the full-screen Agent session panel on the right side of the screen.
+     * Class: sc-c4e423a0-3, Icon text: "expand_content"
+     */
+    async _clickExpandButton(page) {
+        console.log(`      🔲 Checking Expand button to open Agent panel...`);
+
+        // Check if panel is already expanded
+        const alreadyExpanded = await page.evaluate(() => {
+            const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+            const panelHeader = Array.from(document.querySelectorAll('[class*="sc-"]'))
+                .find(el => isVisible(el) && (el.innerText || '').toLowerCase().includes('session') && el.getBoundingClientRect().right > window.innerWidth * 0.7);
+            return !!panelHeader;
+        });
+
+        if (alreadyExpanded) {
+            console.log(`      ✅ Agent panel is already expanded`);
+            return;
+        }
+
+        for (let attempt = 1; attempt <= 3; attempt++) {
+            const coords = await page.evaluate(() => {
+                const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+
+                // Strategy 1: Find by class sc-c4e423a0-3 / ewxUEp and expand_content icon
+                let btn = Array.from(document.querySelectorAll('button')).find(b => {
+                    if (!isVisible(b)) return false;
+                    const cls = b.className || '';
+                    const hasClassMatch = cls.includes('sc-c4e423a0-3') || cls.includes('ewxUEp');
+                    const hasExpandIcon = Array.from(b.querySelectorAll('*'))
+                        .some(el => (el.textContent || '').trim() === 'expand_content' || (el.textContent || '').trim() === 'Expand');
+                    return hasClassMatch && hasExpandIcon;
+                });
+
+                // Strategy 2: Any button with expand_content icon
+                if (!btn) {
+                    btn = Array.from(document.querySelectorAll('button')).find(b => {
+                        if (!isVisible(b)) return false;
+                        return Array.from(b.querySelectorAll('*'))
+                            .some(el => (el.textContent || '').trim() === 'expand_content');
+                    });
+                }
+
+                // Strategy 3: Find by span text "Expand"
+                if (!btn) {
+                    btn = Array.from(document.querySelectorAll('button')).find(b => {
+                        if (!isVisible(b)) return false;
+                        const spans = Array.from(b.querySelectorAll('span'));
+                        return spans.some(s => (s.textContent || '').trim() === 'Expand');
+                    });
+                }
+
+                if (btn) {
+                    if (window.__highlight) window.__highlight(btn);
+                    btn.scrollIntoView({ block: 'center', inline: 'nearest' });
+                    const r = btn.getBoundingClientRect();
+                    return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2) };
+                }
+                return null;
+            });
+
+            if (coords) {
+                console.log(`      🖱️ Clicking Expand button at [${coords.cx}, ${coords.cy}] (attempt ${attempt}/3)...`);
+                try { await page.mouse.click(coords.cx, coords.cy); } catch {}
+                await page.waitForTimeout(1500);
+
+                // Verify the panel opened
+                const panelVisible = await page.evaluate(() => {
+                    const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+                    return Array.from(document.querySelectorAll('textarea, [role="textbox"], [contenteditable="true"]'))
+                        .some(el => {
+                            if (!isVisible(el)) return false;
+                            const r = el.getBoundingClientRect();
+                            return r.left > window.innerWidth * 0.6;
+                        });
+                });
+
+                if (panelVisible) {
+                    console.log(`      ✅ Agent panel expanded successfully!`);
+                    return;
+                }
+            } else {
+                console.warn(`      ⚠️ Expand button not found/visible (attempt ${attempt}/3)`);
+                await page.waitForTimeout(800);
+            }
+        }
+        console.warn(`      ⚠️ Could not confirm Expand panel opened — proceeding with flow`);
+    }
+
+    /**
+     * Opens the Agent Settings panel via the tune/sliders icon in the prompt bar,
+     * configures aspect ratio, model, duration, and confirm=Never, then clicks Save.
+     *
+     * Must be called AFTER avatar and media have been added to the prompt,
+     * because Agent mode must already be active for the settings icon to be visible.
+     */
+    async _applyAgentSettings(page, type, settings = {}) {
         try {
-            console.log(`      ⚙️ Applying UI Settings for type="${type}": ${JSON.stringify(settings)}`);
+            console.log(`      ⚙️ Opening Agent Settings panel for type="${type}": ${JSON.stringify(settings)}`);
 
-            // ── STEP 1: Always Ensure Agent Mode Pill is Turned ON ────────────────────
-            await this._ensureAgentModeEnabled(page);
+            // Ensure any media panel is closed first (press Escape to close if open)
+            await page.evaluate(() => {
+                const isMediaPanelOpen = Array.from(document.querySelectorAll('input[placeholder]'))
+                    .some(i => i.offsetWidth > 0 && (i.getAttribute('placeholder') || '').toLowerCase().includes('search assets'));
+                if (isMediaPanelOpen) {
+                    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+                }
+            });
+            await page.waitForTimeout(600);
 
-            // ── STEP 2: Find & Click Settings (tune) Button in Bottom Prompt Bar ───
+            // ── STEP 1: Check if Agent Settings panel is already open ────────────
             let panelOpened = await page.evaluate(() => {
                 const textPresent = (document.body.innerText || '').includes('Agent settings');
                 const saveBtn = Array.from(document.querySelectorAll('button'))
@@ -596,70 +811,38 @@ export class GoogleFxFlowTool extends BaseTool {
                 return textPresent || saveBtn;
             });
 
+            // ── STEP 2: Find & Click Settings (tune) Icon ───────────────────────
             if (panelOpened) {
                 console.log(`      ✅ Agent Settings drawer is already open`);
             } else {
                 for (let attempt = 1; attempt <= 3; attempt++) {
-                    // Clear pointer-events on backdrop overlays before click attempt
-                    await page.evaluate(() => {
-                        document.querySelectorAll('[class*="sc-e4f4e472-1"], [class*="jIKcWn"], [class*="backdrop"], [class*="overlay-backdrop"]').forEach(el => {
-                            if (!el.closest('[class*="sc-b9afcbbb"], [class*="sc-e4f4e472-3"]')) {
-                                el.style.pointerEvents = 'none';
-                            }
-                        });
-                    });
-
                     const coords = await page.evaluate(() => {
                         const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
-
-                        const isValidSettingsTarget = b => {
+                        const isSettingsTarget = b => {
                             if (!b) return false;
-                            const txt = (b.innerText || b.textContent || '').toLowerCase();
-                            const cls = (b.className || '').toLowerCase();
+                            const txt = (b.innerText || b.textContent || '').toLowerCase().trim();
                             const aria = (b.getAttribute('aria-label') || '').toLowerCase();
-                            
-                            if (txt.includes('expand') || cls.includes('c4e423a0-3') || aria.includes('expand')) return false;
-                            if (txt.includes('instruction') || cls.includes('c4e423a0-2') || aria.includes('instruction')) return false;
+                            if (txt.includes('expand') || aria.includes('expand')) return false;
+                            if (txt.includes('instruction') || aria.includes('instruction')) return false;
+                            if (txt === 'arrow_forward' || aria === 'create' || aria === 'send') return false;
                             return true;
                         };
 
-                        const containers = Array.from(document.querySelectorAll('.sc-c9e4708a-0, .sc-5c3af813-0, [class*="sc-c9e4708a"], [class*="sc-5c3af813"]'))
-                            .filter(c => isVisible(c) && !c.closest('.sc-e4f4e472-3'));
+                        const containers = Array.from(document.querySelectorAll(
+                            '.sc-c9e4708a-0, .sc-5c3af813-0, [class*="sc-c9e4708a"], [class*="sc-5c3af813"]'
+                        )).filter(c => isVisible(c) && !c.closest('.sc-e4f4e472-3'));
                         const promptContainer = containers.length > 0 ? containers[containers.length - 1] : null;
 
                         let btn = null;
-
                         if (promptContainer) {
-                            const btns = Array.from(promptContainer.querySelectorAll('button')).filter(isValidSettingsTarget);
-                            btn = btns.find(b => {
-                                if (!isVisible(b)) return false;
-                                const hasTuneIcon = Array.from(b.querySelectorAll('i, [class*="google-symbols"]'))
-                                    .some(i => (i.textContent || '').trim() === 'tune');
-                                const hasSettingsSpan = Array.from(b.querySelectorAll('span'))
-                                    .some(s => (s.textContent || '').trim() === 'Settings');
-                                return hasTuneIcon || hasSettingsSpan;
-                            });
+                            btn = Array.from(promptContainer.querySelectorAll('button'))
+                                .filter(isSettingsTarget)
+                                .find(b => isVisible(b) && Array.from(b.querySelectorAll('*')).some(el => (el.textContent || '').trim() === 'tune'));
                         }
-
                         if (!btn) {
-                            const allBtns = Array.from(document.querySelectorAll('button')).filter(isValidSettingsTarget);
-                            btn = allBtns.find(b => {
-                                if (!isVisible(b)) return false;
-                                const cls = b.className || '';
-                                return cls.includes('sc-c4e423a0-1') && !cls.includes('sc-c4e423a0-2') && !cls.includes('sc-c4e423a0-3');
-                            });
-                        }
-
-                        if (!btn) {
-                            const allBtns = Array.from(document.querySelectorAll('button')).filter(isValidSettingsTarget);
-                            btn = allBtns.find(b => {
-                                if (!isVisible(b)) return false;
-                                const txt = (b.innerText || b.textContent || '').toLowerCase();
-                                const aria = (b.getAttribute('aria-label') || '').toLowerCase();
-                                const hasTuneIcon = Array.from(b.querySelectorAll('i, [class*="google-symbols"]'))
-                                    .some(i => (i.textContent || '').trim() === 'tune' || (i.textContent || '').trim() === 'settings');
-                                return hasTuneIcon || txt.includes('settings') || aria.includes('settings') || txt.includes('tune');
-                            });
+                            btn = Array.from(document.querySelectorAll('button'))
+                                .filter(isSettingsTarget)
+                                .find(b => isVisible(b) && (b.className || '').includes('sc-c4e423a0-1'));
                         }
 
                         if (btn) {
@@ -672,26 +855,14 @@ export class GoogleFxFlowTool extends BaseTool {
                     });
 
                     if (coords && coords.cx > 0 && coords.cy > 0) {
-                        console.log(`      ⚙️ Settings tune button found at [${coords.cx}, ${coords.cy}] (attempt ${attempt}) — firing SINGLE hardware click...`);
-                        try {
-                            await page.mouse.click(coords.cx, coords.cy);
-                        } catch {}
-                    } else {
-                        console.warn(`      ⚠️ Could not find Settings tune button via coordinates, attempting DOM click...`);
-                        await page.evaluate(() => {
-                            const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
-                            const tuneBtn = document.querySelector('button.sc-c4e423a0-1:not(.sc-c4e423a0-2):not(.sc-c4e423a0-3)')
-                                || Array.from(document.querySelectorAll('button')).find(b => isVisible(b) && ((b.innerText || '').includes('Settings') || Array.from(b.querySelectorAll('i')).some(i => (i.textContent||'').trim()==='tune')));
-                            if (tuneBtn) tuneBtn.click();
-                        });
+                        console.log(`      ⚙️ Settings tune button clicked at [${coords.cx}, ${coords.cy}] (attempt ${attempt})`);
+                        try { await page.mouse.click(coords.cx, coords.cy); } catch {}
                     }
-
                     await page.waitForTimeout(1000);
 
                     panelOpened = await page.evaluate(() => {
                         const textPresent = (document.body.innerText || '').includes('Agent settings');
-                        const saveBtn = Array.from(document.querySelectorAll('button'))
-                            .some(b => b.offsetWidth > 0 && (b.innerText || '').trim() === 'Save');
+                        const saveBtn = Array.from(document.querySelectorAll('button')).some(b => b.offsetWidth > 0 && (b.innerText || '').trim() === 'Save');
                         return textPresent || saveBtn;
                     });
 
@@ -707,27 +878,15 @@ export class GoogleFxFlowTool extends BaseTool {
                 return;
             }
 
-            // Disable backdrop pointer interception if present
-            await page.evaluate(() => {
-                document.querySelectorAll('[class*="sc-e4f4e472-1"], [class*="backdrop"], [class*="overlay"]').forEach(el => {
-                    const s = window.getComputedStyle(el);
-                    if ((s.position === 'fixed' || s.position === 'absolute') && parseInt(s.width) > 300)
-                        el.style.pointerEvents = 'none';
-                });
-            });
-
-            // ── STEP 3: Set "Confirm before generating" → Never (with verification & retry) ─
+            // ── STEP 3: Set "Confirm before generating" → Never ──────────────────
             let neverConfirmed = false;
             for (let attempt = 1; attempt <= 3; attempt++) {
                 const coords = await page.evaluate(() => {
-                    const radios = Array.from(document.querySelectorAll('button[role="radio"]'));
-                    const neverRadio = radios.find(r => r.getAttribute('value') === 'AUTO_APPROVE' || (r.innerText || '').includes('Never'));
+                    const radios = Array.from(document.querySelectorAll('button[role="radio"], [role="radio"]'));
+                    const neverRadio = radios.find(r => r.getAttribute('value') === 'AUTO_APPROVE' || (r.innerText || r.textContent || '').includes('Never'));
                     if (neverRadio) {
                         if (window.__highlight) window.__highlight(neverRadio);
-                        neverRadio.scrollIntoView({ block: 'center' });
-                        neverRadio.focus();
                         neverRadio.click();
-                        neverRadio.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
                         const r = neverRadio.getBoundingClientRect();
                         return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2) };
                     }
@@ -737,452 +896,208 @@ export class GoogleFxFlowTool extends BaseTool {
                 if (coords && coords.cx > 0 && coords.cy > 0) {
                     try { await page.mouse.click(coords.cx, coords.cy); } catch {}
                 }
-
-                await page.waitForTimeout(600);
+                await page.waitForTimeout(500);
 
                 neverConfirmed = await page.evaluate(() => {
-                    const radios = Array.from(document.querySelectorAll('button[role="radio"]'));
-                    const neverRadio = radios.find(r => r.getAttribute('value') === 'AUTO_APPROVE' || (r.innerText || '').includes('Never'));
+                    const radios = Array.from(document.querySelectorAll('button[role="radio"], [role="radio"]'));
+                    const neverRadio = radios.find(r => r.getAttribute('value') === 'AUTO_APPROVE' || (r.innerText || r.textContent || '').includes('Never'));
                     return neverRadio && (neverRadio.getAttribute('data-state') === 'checked' || neverRadio.getAttribute('aria-checked') === 'true');
                 });
 
                 if (neverConfirmed) {
-                    console.log(`      ✅ Set confirmation → Never (verified on attempt ${attempt})`);
+                    console.log(`      ✅ Set confirmation → Never (verified)`);
                     break;
-                } else {
-                    console.warn(`      ⚠️ Confirmation "Never" verification failed (attempt ${attempt}/3) — retrying...`);
-                    await page.waitForTimeout(500);
                 }
+            }
+
+            // ── STEP 4: Target Section ("Video generation default") & Apply Settings ───────
+            const isVideoJob = type === 'video' || type === 'avatar_video';
+            const arVal = settings.aspectRatio || settings.aspect_ratio || settings.ratio || '9:16';
+            const targetAr = String(arVal).trim();
+
+            // HARDCODED: count/multiplier is ALWAYS x1 as requested by user
+            const targetCountText = 'x1';
+
+            const rawModelStr = String(settings.model || 'Omni Flash').trim();
+
+            const normalizeModel = (m, isVid) => {
+                const l = m.toLowerCase();
+                if (!isVid) {
+                    if (l.includes('banana 2') || l.includes('nano 2')) return 'Nano Banana 2';
+                    if (l.includes('imagen')) return 'Imagen 3';
+                } else {
+                    if (l.includes('omni') || l.includes('flash')) return 'Omni Flash';
+                    if (l.includes('veo 3.1 - lite') || l.includes('lite')) return 'Veo 3.1 - Lite';
+                    if (l.includes('veo 3.1 - fast') || l.includes('fast')) return 'Veo 3.1 - Fast';
+                    if (l.includes('veo 3.1 - quality') || l.includes('quality')) return 'Veo 3.1 - Quality';
+                }
+                return m;
+            };
+            const targetModelName = normalizeModel(rawModelStr, isVideoJob);
+
+            // 4a. Isolate section container & click Aspect Ratio pill (9:16) via physical mouse click
+            const arCoords = await page.evaluate(({ isVid, targetAr }) => {
+                const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+                const targetTitle = isVid ? 'video generation default' : 'image generation default';
+                const allMatching = Array.from(document.querySelectorAll('*')).filter(el => {
+                    if (!isVisible(el)) return false;
+                    const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
+                    return txt === targetTitle;
+                });
+                const headingEl = allMatching.sort((a, b) => (a.innerText || '').length - (b.innerText || '').length)[0];
+                
+                let container = headingEl ? headingEl.parentElement : document.body;
+                while (container && container !== document.body) {
+                    const btns = container.querySelectorAll('button');
+                    if (btns.length >= 2 && container.clientHeight < window.innerHeight * 0.8) break;
+                    container = container.parentElement;
+                }
+                if (!container) container = document.body;
+
+                container.scrollIntoView({ block: 'center' });
+
+                const pills = Array.from(container.querySelectorAll('button')).filter(p => isVisible(p));
+                const arPill = pills.find(p => {
+                    const txt = (p.innerText || p.textContent || '').trim();
+                    return txt === targetAr || txt.endsWith(targetAr) || txt.includes(targetAr);
+                });
+
+                if (arPill) {
+                    if (window.__highlight) window.__highlight(arPill);
+                    const r = arPill.getBoundingClientRect();
+                    return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2) };
+                }
+                return null;
+            }, { isVid: isVideoJob, targetAr });
+
+            if (arCoords && arCoords.cx > 0 && arCoords.cy > 0) {
+                console.log(`      🖱️ Mouse clicking Aspect Ratio "${targetAr}" at [${arCoords.cx}, ${arCoords.cy}]...`);
+                try { await page.mouse.click(arCoords.cx, arCoords.cy); } catch {}
+                console.log(`      ✅ Selected Aspect Ratio "${targetAr}" in ${isVideoJob ? 'Video' : 'Image'} generation default`);
+            } else {
+                console.warn(`      ⚠️ Could not locate Aspect Ratio pill "${targetAr}" in section`);
             }
             await page.waitForTimeout(1000);
 
-            // ── STEP 4: Scope and Apply Settings (Image vs Video) with Verification & Retry ──
-            // 4a. Select Aspect Ratio inside target section
-            const arVal = settings.aspectRatio || settings.aspect_ratio || settings.ratio;
-            if (arVal) {
-                const targetAr = String(arVal).trim();
-                let arConfirmed = false;
-
-                for (let attempt = 1; attempt <= 3; attempt++) {
-                    const arCoords = await page.evaluate(({ type, targetAr }) => {
-                        const isVideo = type === 'video';
-                        const expectedTitle = isVideo ? 'video generation default' : 'image generation default';
-                        const sections = Array.from(document.querySelectorAll('.sc-b9afcbbb-5, [class*="ebIqUq"]'));
-                        
-                        let sectionContainer = null;
-                        const headingSpans = Array.from(document.querySelectorAll('.sc-b9afcbbb-6, [class*="kxgCJU"], h3, span'));
-                        const matchedSpan = headingSpans.find(s => s.offsetWidth > 0 && (s.innerText || s.textContent || '').trim().toLowerCase() === expectedTitle);
-                        if (matchedSpan) {
-                            sectionContainer = matchedSpan.closest('.sc-b9afcbbb-5, [class*="ebIqUq"]');
-                        }
-                        if (!sectionContainer && sections.length > 0) {
-                            sectionContainer = isVideo ? (sections[2] || sections[sections.length - 1]) : (sections[1] || sections[0]);
-                        }
-                        if (!sectionContainer) return null;
-
-                        const tabs = Array.from(sectionContainer.querySelectorAll('button[role="tab"], button'));
-                        const arTab = tabs.find(t => {
-                            const txt = (t.innerText || t.textContent || '').trim();
-                            return txt === targetAr || txt.endsWith(targetAr) || txt.includes(targetAr);
-                        });
-
-                        if (arTab) {
-                            if (window.__highlight) window.__highlight(arTab);
-                            arTab.scrollIntoView({ block: 'center', inline: 'nearest' });
-                            arTab.focus();
-                            arTab.click();
-                            arTab.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-                            const r = arTab.getBoundingClientRect();
-                            return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2) };
-                        }
-                        return null;
-                    }, { type, targetAr });
-
-                    if (arCoords && arCoords.cx > 0 && arCoords.cy > 0) {
-                        try { await page.mouse.click(arCoords.cx, arCoords.cy); } catch {}
-                    }
-
-                    await page.waitForTimeout(600);
-
-                    arConfirmed = await page.evaluate(({ type, targetAr }) => {
-                        const isVideo = type === 'video';
-                        const expectedTitle = isVideo ? 'video generation default' : 'image generation default';
-                        const sections = Array.from(document.querySelectorAll('.sc-b9afcbbb-5, [class*="ebIqUq"]'));
-                        let sectionContainer = null;
-                        const headingSpans = Array.from(document.querySelectorAll('.sc-b9afcbbb-6, [class*="kxgCJU"], h3, span'));
-                        const matchedSpan = headingSpans.find(s => s.offsetWidth > 0 && (s.innerText || s.textContent || '').trim().toLowerCase() === expectedTitle);
-                        if (matchedSpan) sectionContainer = matchedSpan.closest('.sc-b9afcbbb-5, [class*="ebIqUq"]');
-                        if (!sectionContainer && sections.length > 0) sectionContainer = isVideo ? (sections[2] || sections[sections.length - 1]) : (sections[1] || sections[0]);
-                        if (!sectionContainer) return false;
-
-                        const tabs = Array.from(sectionContainer.querySelectorAll('button[role="tab"], button'));
-                        const arTab = tabs.find(t => {
-                            const txt = (t.innerText || t.textContent || '').trim();
-                            return txt === targetAr || txt.endsWith(targetAr) || txt.includes(targetAr);
-                        });
-                        return arTab && (arTab.getAttribute('data-state') === 'active' || arTab.getAttribute('aria-selected') === 'true');
-                    }, { type, targetAr });
-
-                    if (arConfirmed) {
-                        console.log(`      ✅ Aspect Ratio (${type}): verified "${targetAr}" is active (attempt ${attempt})`);
-                        break;
-                    } else {
-                        console.warn(`      ⚠️ Aspect Ratio (${type}) "${targetAr}" not active (attempt ${attempt}/3) — retrying...`);
-                        await page.waitForTimeout(500);
-                    }
+            // 4b. Count Selection (Hardcoded x1) via physical mouse click
+            const countCoords = await page.evaluate(({ isVid, targetCountText }) => {
+                const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+                const targetTitle = isVid ? 'video generation default' : 'image generation default';
+                const allMatching = Array.from(document.querySelectorAll('*')).filter(el => {
+                    if (!isVisible(el)) return false;
+                    const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
+                    return txt === targetTitle;
+                });
+                const headingEl = allMatching.sort((a, b) => (a.innerText || '').length - (b.innerText || '').length)[0];
+                let container = headingEl ? headingEl.parentElement : document.body;
+                while (container && container !== document.body) {
+                    const btns = container.querySelectorAll('button');
+                    if (btns.length >= 2 && container.clientHeight < window.innerHeight * 0.8) break;
+                    container = container.parentElement;
                 }
-                await page.waitForTimeout(1000);
-            }
+                if (!container) container = document.body;
 
-            // 4b. Select Count (x1, x2, x3, x4) with Verification & Retry
-            const countVal = settings.count ?? settings.quantity;
-            if (countVal !== undefined && countVal !== null && countVal !== '') {
-                const num = String(countVal).replace(/[^0-9]/g, '').trim() || '1';
-                const targetCountText = `x${num}`;
-                let countConfirmed = false;
-
-                for (let attempt = 1; attempt <= 3; attempt++) {
-                    const countCoords = await page.evaluate(({ type, num, targetCountText }) => {
-                        const isVideo = type === 'video';
-                        const expectedTitle = isVideo ? 'video generation default' : 'image generation default';
-                        const sections = Array.from(document.querySelectorAll('.sc-b9afcbbb-5, [class*="ebIqUq"]'));
-
-                        let sectionContainer = null;
-                        const headingSpans = Array.from(document.querySelectorAll('.sc-b9afcbbb-6, [class*="kxgCJU"], h3, span'));
-                        const matchedSpan = headingSpans.find(s => s.offsetWidth > 0 && (s.innerText || s.textContent || '').trim().toLowerCase() === expectedTitle);
-                        if (matchedSpan) {
-                            sectionContainer = matchedSpan.closest('.sc-b9afcbbb-5, [class*="ebIqUq"]');
-                        }
-                        if (!sectionContainer && sections.length > 0) {
-                            sectionContainer = isVideo ? (sections[2] || sections[sections.length - 1]) : (sections[1] || sections[0]);
-                        }
-                        if (!sectionContainer) return null;
-
-                        const countTablist = sectionContainer.querySelector('.gmOsyE, [class*="gmOsyE"]') || sectionContainer;
-                        const tabs = Array.from(countTablist.querySelectorAll('button[role="tab"], button'));
-
-                        const countTab = tabs.find(t => {
-                            const txt = (t.innerText || t.textContent || '').trim().toLowerCase();
-                            const id = (t.id || '').toLowerCase();
-                            const ctrl = (t.getAttribute('aria-controls') || '').toLowerCase();
-                            return txt === targetCountText || txt === num || id.endsWith(`trigger-${num}`) || ctrl.endsWith(`content-${num}`);
-                        });
-
-                        if (countTab) {
-                            if (window.__highlight) window.__highlight(countTab);
-                            countTab.scrollIntoView({ block: 'center', inline: 'nearest' });
-                            countTab.focus();
-                            countTab.click();
-                            countTab.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-                            const r = countTab.getBoundingClientRect();
-                            return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2) };
-                        }
-                        return null;
-                    }, { type, num, targetCountText });
-
-                    if (countCoords && countCoords.cx > 0 && countCoords.cy > 0) {
-                        try { await page.mouse.click(countCoords.cx, countCoords.cy); } catch {}
-                    }
-
-                    await page.waitForTimeout(600);
-
-                    countConfirmed = await page.evaluate(({ type, num, targetCountText }) => {
-                        const isVideo = type === 'video';
-                        const expectedTitle = isVideo ? 'video generation default' : 'image generation default';
-                        const sections = Array.from(document.querySelectorAll('.sc-b9afcbbb-5, [class*="ebIqUq"]'));
-                        let sectionContainer = null;
-                        const headingSpans = Array.from(document.querySelectorAll('.sc-b9afcbbb-6, [class*="kxgCJU"], h3, span'));
-                        const matchedSpan = headingSpans.find(s => s.offsetWidth > 0 && (s.innerText || s.textContent || '').trim().toLowerCase() === expectedTitle);
-                        if (matchedSpan) sectionContainer = matchedSpan.closest('.sc-b9afcbbb-5, [class*="ebIqUq"]');
-                        if (!sectionContainer && sections.length > 0) sectionContainer = isVideo ? (sections[2] || sections[sections.length - 1]) : (sections[1] || sections[0]);
-                        if (!sectionContainer) return false;
-
-                        const countTablist = sectionContainer.querySelector('.gmOsyE, [class*="gmOsyE"]') || sectionContainer;
-                        const tabs = Array.from(countTablist.querySelectorAll('button[role="tab"], button'));
-                        const countTab = tabs.find(t => {
-                            const txt = (t.innerText || t.textContent || '').trim().toLowerCase();
-                            const id = (t.id || '').toLowerCase();
-                            const ctrl = (t.getAttribute('aria-controls') || '').toLowerCase();
-                            return txt === targetCountText || txt === num || id.endsWith(`trigger-${num}`) || ctrl.endsWith(`content-${num}`);
-                        });
-
-                        return countTab && (countTab.getAttribute('data-state') === 'active' || countTab.getAttribute('aria-selected') === 'true');
-                    }, { type, num, targetCountText });
-
-                    if (countConfirmed) {
-                        console.log(`      ✅ Count (${type}): verified "${targetCountText}" is active (attempt ${attempt})`);
-                        break;
-                    } else {
-                        console.warn(`      ⚠️ Count (${type}) "${targetCountText}" not active (attempt ${attempt}/3) — retrying...`);
-                        await page.waitForTimeout(500);
-                    }
+                const countTab = Array.from(container.querySelectorAll('button')).find(b => {
+                    if (!isVisible(b)) return false;
+                    const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
+                    return txt === targetCountText;
+                });
+                if (countTab) {
+                    if (window.__highlight) window.__highlight(countTab);
+                    const r = countTab.getBoundingClientRect();
+                    return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2) };
                 }
-                await page.waitForTimeout(1000);
+                return null;
+            }, { isVid: isVideoJob, targetCountText });
+
+            if (countCoords && countCoords.cx > 0 && countCoords.cy > 0) {
+                console.log(`      🖱️ Mouse clicking Count "${targetCountText}" at [${countCoords.cx}, ${countCoords.cy}]...`);
+                try { await page.mouse.click(countCoords.cx, countCoords.cy); } catch {}
+                console.log(`      ✅ Selected Count "${targetCountText}" (hardcoded) in ${isVideoJob ? 'Video' : 'Image'} generation default`);
+            } else {
+                console.warn(`      ⚠️ Could not locate Count button "${targetCountText}" in section`);
             }
+            await page.waitForTimeout(1000);
 
-            // 4c. Select Duration (Video only) with Verification & Retry
-            if (type === 'video' && settings.duration) {
-                const durStr = String(settings.duration).replace(/s$/i, '').trim();
-                let durConfirmed = false;
-
-                for (let attempt = 1; attempt <= 3; attempt++) {
-                    const durCoords = await page.evaluate(({ durStr }) => {
-                        const sections = Array.from(document.querySelectorAll('.sc-b9afcbbb-5, [class*="ebIqUq"]'));
-                        const sectionContainer = sections.length >= 3 ? sections[2] : (sections[sections.length - 1] || document.body);
-
-                        const tabs = Array.from(sectionContainer.querySelectorAll('button[role="tab"], button'));
-                        const durTab = tabs.find(t => {
-                            const txt = (t.innerText || t.textContent || '').trim();
-                            return txt === `${durStr}s` || txt === durStr;
-                        });
-
-                        if (durTab) {
-                            if (window.__highlight) window.__highlight(durTab);
-                            durTab.scrollIntoView({ block: 'center', inline: 'nearest' });
-                            durTab.focus();
-                            durTab.click();
-                            durTab.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-                            const r = durTab.getBoundingClientRect();
-                            return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2) };
-                        }
-                        return null;
-                    }, { durStr });
-
-                    if (durCoords && durCoords.cx > 0 && durCoords.cy > 0) {
-                        try { await page.mouse.click(durCoords.cx, durCoords.cy); } catch {}
-                    }
-
-                    await page.waitForTimeout(600);
-
-                    durConfirmed = await page.evaluate(({ durStr }) => {
-                        const sections = Array.from(document.querySelectorAll('.sc-b9afcbbb-5, [class*="ebIqUq"]'));
-                        const sectionContainer = sections.length >= 3 ? sections[2] : (sections[sections.length - 1] || document.body);
-                        const tabs = Array.from(sectionContainer.querySelectorAll('button[role="tab"], button'));
-                        const durTab = tabs.find(t => {
-                            const txt = (t.innerText || t.textContent || '').trim();
-                            return txt === `${durStr}s` || txt === durStr;
-                        });
-                        return durTab && (durTab.getAttribute('data-state') === 'active' || durTab.getAttribute('aria-selected') === 'true');
-                    }, { durStr });
-
-                    if (durConfirmed) {
-                        console.log(`      ✅ Duration (video): verified "${durStr}s" is active (attempt ${attempt})`);
-                        break;
-                    } else {
-                        console.warn(`      ⚠️ Duration (video) "${durStr}s" not active (attempt ${attempt}/3) — retrying...`);
-                        await page.waitForTimeout(500);
-                    }
+            // 4c. Model Dropdown Selection via physical mouse click
+            const dropdownCoords = await page.evaluate(({ isVid }) => {
+                const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+                const targetTitle = isVid ? 'video generation default' : 'image generation default';
+                const allMatching = Array.from(document.querySelectorAll('*')).filter(el => {
+                    if (!isVisible(el)) return false;
+                    const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
+                    return txt === targetTitle;
+                });
+                const headingEl = allMatching.sort((a, b) => (a.innerText || '').length - (b.innerText || '').length)[0];
+                let container = headingEl ? headingEl.parentElement : document.body;
+                while (container && container !== document.body) {
+                    const btns = container.querySelectorAll('button');
+                    if (btns.length >= 2 && container.clientHeight < window.innerHeight * 0.8) break;
+                    container = container.parentElement;
                 }
-                await page.waitForTimeout(1000);
-            }
+                if (!container) container = document.body;
 
-            // 4d. Model Dropdown Selection inside target section with Verification & Retry
-            if (settings.model) {
-                const rawModelStr = String(settings.model).trim();
-                
-                // Normalizer helper: map any user variations to exact UI model names
-                const normalizeModel = (m, sectionType) => {
-                    const l = m.toLowerCase();
-                    if (sectionType === 'image') {
-                        if (l.includes('lite') || l.includes('banana 2 lite')) return 'Nano Banana 2 Lite';
-                        if (l.includes('pro') && !l.includes('2')) return 'Nano Banana Pro';
-                        if (l.includes('banana 2') || l.includes('nano 2')) return 'Nano Banana 2';
-                        if (l.includes('banana') || l.includes('nano')) return 'Nano Banana 2';
-                        if (l.includes('imagen')) return 'Imagen 3';
-                    } else if (sectionType === 'video') {
-                        if (l.includes('omni') || l.includes('flash')) return 'Omni Flash';
-                        if (l.includes('veo')) return 'Veo 2';
+                const dropdownBtn = Array.from(container.querySelectorAll('button')).find(b => {
+                    if (!isVisible(b)) return false;
+                    const txt = (b.innerText || b.textContent || '').trim();
+                    const hasIcon = Array.from(b.querySelectorAll('*')).some(el => (el.textContent || '').trim() === 'arrow_drop_down');
+                    return hasIcon || txt.includes('Omni') || txt.includes('Banana') || txt.includes('Veo');
+                });
+
+                if (dropdownBtn) {
+                    if (window.__highlight) window.__highlight(dropdownBtn);
+                    const r = dropdownBtn.getBoundingClientRect();
+                    return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2) };
+                }
+                return null;
+            }, { isVid: isVideoJob });
+
+            if (dropdownCoords && dropdownCoords.cx > 0 && dropdownCoords.cy > 0) {
+                console.log(`      🖱️ Mouse clicking Model dropdown at [${dropdownCoords.cx}, ${dropdownCoords.cy}]...`);
+                try { await page.mouse.click(dropdownCoords.cx, dropdownCoords.cy); } catch {}
+                await page.waitForTimeout(1200);
+
+                const optionCoords = await page.evaluate((modelName) => {
+                    const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+                    const searchLower = modelName.toLowerCase();
+                    const options = Array.from(document.querySelectorAll('button[role="menuitem"], [role="option"], [role="menuitemradio"], button, div'))
+                        .filter(el => isVisible(el) && (el.innerText || el.textContent || '').trim().length > 0);
+                    const match = options.find(el => {
+                        const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
+                        return txt === searchLower || txt.includes(searchLower);
+                    });
+                    if (match) {
+                        if (window.__highlight) window.__highlight(match);
+                        const r = match.getBoundingClientRect();
+                        return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2) };
                     }
-                    return m;
-                };
+                    return null;
+                }, targetModelName);
 
-                const modelStr = normalizeModel(rawModelStr, type);
-
-                // Pre-check: Verify if desired model is ALREADY selected (ALL words must match, e.g. "lite", "flash")
-                const alreadySelected = await page.evaluate(({ type, modelName }) => {
-                    const isVideo = type === 'video';
-                    const expectedTitle = isVideo ? 'video generation default' : 'image generation default';
-                    const sections = Array.from(document.querySelectorAll('.sc-b9afcbbb-5, [class*="ebIqUq"]'));
-                    let sectionContainer = null;
-                    const headingSpans = Array.from(document.querySelectorAll('.sc-b9afcbbb-6, [class*="kxgCJU"], h3, span'));
-                    const matchedSpan = headingSpans.find(s => s.offsetWidth > 0 && (s.innerText || s.textContent || '').trim().toLowerCase() === expectedTitle);
-                    if (matchedSpan) sectionContainer = matchedSpan.closest('.sc-b9afcbbb-5, [class*="ebIqUq"]');
-                    if (!sectionContainer && sections.length > 0) sectionContainer = isVideo ? (sections[2] || sections[sections.length - 1]) : (sections[1] || sections[0]);
-                    if (!sectionContainer) return false;
-
-                    const allBtns = Array.from(sectionContainer.querySelectorAll('button'));
-                    const filtered = allBtns.filter(b => !b.closest('.cbQAua, [class*="cbQAua"]') && !b.closest('.gmOsyE, [class*="gmOsyE"]'));
-                    const modelBtn = filtered.length > 0 ? filtered[0] : (allBtns[allBtns.length - 1] || null);
-                    if (!modelBtn) return false;
-
-                    const currentText = (modelBtn.innerText || modelBtn.textContent || '').toLowerCase();
-                    const reqWords = modelName.toLowerCase().split(/\s+/).filter(w => w.length > 0);
-                    return reqWords.every(w => currentText.includes(w));
-                }, { type, modelName: modelStr });
-
-                if (alreadySelected) {
-                    console.log(`      ✅ Model (${type}): "${modelStr}" is ALREADY selected`);
+                if (optionCoords && optionCoords.cx > 0 && optionCoords.cy > 0) {
+                    console.log(`      🖱️ Mouse clicking Model option "${targetModelName}" at [${optionCoords.cx}, ${optionCoords.cy}]...`);
+                    try { await page.mouse.click(optionCoords.cx, optionCoords.cy); } catch {}
+                    console.log(`      ✅ Selected Model "${targetModelName}" for ${isVideoJob ? 'Video' : 'Image'} generation default`);
                 } else {
-                    let modelConfirmed = false;
-                    for (let attempt = 1; attempt <= 3; attempt++) {
-                        const modelBtnInfo = await page.evaluate(({ type }) => {
-                            const isVideo = type === 'video';
-                            const expectedTitle = isVideo ? 'video generation default' : 'image generation default';
-                            const sections = Array.from(document.querySelectorAll('.sc-b9afcbbb-5, [class*="ebIqUq"]'));
-
-                            let sectionContainer = null;
-                            const headingSpans = Array.from(document.querySelectorAll('.sc-b9afcbbb-6, [class*="kxgCJU"], h3, span'));
-                            const matchedSpan = headingSpans.find(s => s.offsetWidth > 0 && (s.innerText || s.textContent || '').trim().toLowerCase() === expectedTitle);
-                            if (matchedSpan) sectionContainer = matchedSpan.closest('.sc-b9afcbbb-5, [class*="ebIqUq"]');
-                            if (!sectionContainer && sections.length > 0) sectionContainer = isVideo ? (sections[2] || sections[sections.length - 1]) : (sections[1] || sections[0]);
-                            if (!sectionContainer) return null;
-
-                            const allBtns = Array.from(sectionContainer.querySelectorAll('button'));
-                            const filtered = allBtns.filter(b => !b.closest('.cbQAua, [class*="cbQAua"]') && !b.closest('.gmOsyE, [class*="gmOsyE"]'));
-                            const modelBtn = filtered.length > 0 ? filtered[0] : (allBtns.find(b => Array.from(b.querySelectorAll('i, [class*="google-symbols"]')).some(i => (i.textContent || '').trim() === 'arrow_drop_down')) || allBtns[allBtns.length - 1]);
-
-                            if (modelBtn) {
-                                if (window.__highlight) window.__highlight(modelBtn);
-                                modelBtn.scrollIntoView({ block: 'center', inline: 'nearest' });
-                                const isOpen = modelBtn.getAttribute('aria-expanded') === 'true' || modelBtn.getAttribute('data-state') === 'open';
-                                const r = modelBtn.getBoundingClientRect();
-                                return { isOpen, cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2) };
-                            }
-                            return null;
-                        }, { type });
-
-                        if (modelBtnInfo && modelBtnInfo.cx > 0 && modelBtnInfo.cy > 0) {
-                            if (!modelBtnInfo.isOpen) {
-                                console.log(`      ⚙️ Opening Model dropdown (${type}) via hardware click at [${modelBtnInfo.cx}, ${modelBtnInfo.cy}] (attempt ${attempt})...`);
-                                try { await page.mouse.click(modelBtnInfo.cx, modelBtnInfo.cy); } catch {}
-                            }
-                            await page.waitForTimeout(1000);
-
-                            const optionClicked = await page.evaluate((modelName) => {
-                                const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
-                                const searchLower = modelName.toLowerCase().trim();
-                                const reqWords = searchLower.split(/\s+/).filter(w => w.length > 0);
-
-                                const candidates = Array.from(document.querySelectorAll('button[role="menuitem"], .sc-3f41cc92-2, .sc-3f41cc92-13, [role="option"], [data-radix-collection-item]'))
-                                    .filter(el => {
-                                        if (!isVisible(el)) return false;
-                                        if (el.classList && el.classList.contains('sc-3f41cc92-1') && !el.classList.contains('sc-3f41cc92-2')) return false;
-                                        if (el.closest('.sc-c04de9ef-0')) return false;
-                                        return true;
-                                    });
-
-                                let match = candidates.find(el => {
-                                    const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
-                                    return txt === searchLower || txt === `🍌 ${searchLower}`;
-                                });
-
-                                if (!match) {
-                                    match = candidates.find(el => {
-                                        const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
-                                        return reqWords.length > 0 && reqWords.every(w => txt.includes(w));
-                                    });
-                                }
-
-                                if (!match) {
-                                    match = candidates.find(el => {
-                                        const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
-                                        return txt.includes(searchLower) || searchLower.includes(txt);
-                                    });
-                                }
-
-                                if (!match) {
-                                    const keyWord = reqWords.find(w => w !== 'nano' && w !== '2' && w.length >= 3) || reqWords[reqWords.length - 1];
-                                    if (keyWord) {
-                                        match = candidates.find(el => {
-                                            const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
-                                            return txt.includes(keyWord);
-                                        });
-                                    }
-                                }
-
-                                if (match) {
-                                    const targetBtn = match.closest('button, [role="menuitem"], [role="option"], [data-radix-collection-item]') || match;
-                                    if (window.__highlight) window.__highlight(targetBtn);
-                                    targetBtn.scrollIntoView({ block: 'center', inline: 'nearest' });
-                                    targetBtn.click();
-                                    return true;
-                                }
-
-                                return false;
-                            }, modelStr);
-
-                            if (optionClicked) {
-                                console.log(`      🎯 Selected option "${modelStr}" in dropdown`);
-                            } else {
-                                console.warn(`      ⚠️ Could not locate option for "${modelStr}" in open dropdown menu`);
-                            }
-
-                            await page.waitForTimeout(1000);
-
-                            modelConfirmed = await page.evaluate(({ type, modelName }) => {
-                                const isVideo = type === 'video';
-                                const expectedTitle = isVideo ? 'video generation default' : 'image generation default';
-                                const sections = Array.from(document.querySelectorAll('.sc-b9afcbbb-5, [class*="ebIqUq"]'));
-                                let sectionContainer = null;
-                                const headingSpans = Array.from(document.querySelectorAll('.sc-b9afcbbb-6, [class*="kxgCJU"], h3, span'));
-                                const matchedSpan = headingSpans.find(s => s.offsetWidth > 0 && (s.innerText || s.textContent || '').trim().toLowerCase() === expectedTitle);
-                                if (matchedSpan) sectionContainer = matchedSpan.closest('.sc-b9afcbbb-5, [class*="ebIqUq"]');
-                                if (!sectionContainer && sections.length > 0) sectionContainer = isVideo ? (sections[2] || sections[sections.length - 1]) : (sections[1] || sections[0]);
-                                if (!sectionContainer) return true;
-
-                                const allBtns = Array.from(sectionContainer.querySelectorAll('button'));
-                                const filtered = allBtns.filter(b => !b.closest('.cbQAua, [class*="cbQAua"]') && !b.closest('.gmOsyE, [class*="gmOsyE"]'));
-                                const modelBtn = filtered.length > 0 ? filtered[0] : (allBtns[allBtns.length - 1] || null);
-                                if (!modelBtn) return true;
-
-                                const currentText = (modelBtn.innerText || modelBtn.textContent || '').toLowerCase();
-                                const reqWords = modelName.toLowerCase().split(/\s+/).filter(w => w.length > 0);
-                                return reqWords.every(w => currentText.includes(w));
-                            }, { type, modelName: modelStr });
-
-                            if (modelConfirmed) {
-                                console.log(`      ✅ Model (${type}): verified "${modelStr}" is selected (attempt ${attempt})`);
-                                break;
-                            }
-                        }
-                        console.warn(`      ⚠️ Model (${type}) "${modelStr}" verification failed (attempt ${attempt}/3) — retrying...`);
-                        await page.waitForTimeout(500);
-                    }
+                    console.warn(`      ⚠️ Model option "${targetModelName}" not found in dropdown menu`);
                 }
-                await page.waitForTimeout(1000);
+            } else {
+                console.warn(`      ⚠️ Could not open Model dropdown in ${isVideoJob ? 'Video' : 'Image'} generation default`);
             }
+            await page.waitForTimeout(1000);
 
-            // ── STEP 5: Scroll Drawer & Click Save Button with Verification & Retry ─
+            // ── STEP 5: Click Save Button ───────────────────────────────────────
             let saveConfirmed = false;
             for (let saveAttempt = 1; saveAttempt <= 3; saveAttempt++) {
-                await page.evaluate(() => {
-                    const containers = Array.from(document.querySelectorAll('.sc-b9afcbbb-3, [class*="cRumFH"], [class*="sc-b9afcbbb"], [class*="sc-e4f4e472"]'));
-                    containers.forEach(c => {
-                        if (c.scrollHeight > c.clientHeight) {
-                            c.scrollTop = c.scrollHeight;
-                        }
-                    });
-                });
-                await page.waitForTimeout(500);
-
                 const saveCoords = await page.evaluate(() => {
                     const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
                     const allBtns = Array.from(document.querySelectorAll('button'));
-
                     let saveBtn = allBtns.find(b => isVisible(b) && (b.className || '').includes('sc-b9afcbbb-16'));
-                    if (!saveBtn) {
-                        const container = document.querySelector('.sc-b9afcbbb-15, [class*="sc-b9afcbbb-15"]');
-                        if (container) saveBtn = container.querySelector('button');
-                    }
-                    if (!saveBtn) {
-                        saveBtn = allBtns.find(b => isVisible(b) && (b.innerText || b.textContent || '').trim().toLowerCase() === 'save');
-                    }
+                    if (!saveBtn) saveBtn = allBtns.find(b => isVisible(b) && (b.innerText || b.textContent || '').trim() === 'Save');
 
                     if (saveBtn) {
                         if (window.__highlight) window.__highlight(saveBtn);
-                        saveBtn.scrollIntoView({ block: 'center', inline: 'nearest' });
                         saveBtn.click();
-                        saveBtn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
                         const r = saveBtn.getBoundingClientRect();
                         return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2) };
                     }
@@ -1192,21 +1107,16 @@ export class GoogleFxFlowTool extends BaseTool {
                 if (saveCoords && saveCoords.cx > 0 && saveCoords.cy > 0) {
                     try { await page.mouse.click(saveCoords.cx, saveCoords.cy); } catch {}
                 }
-
                 await page.waitForTimeout(800);
 
                 saveConfirmed = await page.evaluate(() => {
-                    const drawerPresent = document.querySelector('.sc-b9afcbbb-3, [class*="cRumFH"]');
                     const textPresent = (document.body.innerText || '').includes('Agent settings');
-                    return !drawerPresent && !textPresent;
+                    return !textPresent;
                 });
 
                 if (saveConfirmed) {
-                    console.log(`      ✅ Save verified — settings panel closed cleanly (attempt ${saveAttempt})`);
+                    console.log(`      ✅ Save verified — settings panel closed cleanly`);
                     break;
-                } else {
-                    console.warn(`      ⚠️ Save click verification attempt ${saveAttempt}/3 — retrying click...`);
-                    await page.waitForTimeout(600);
                 }
             }
 
@@ -1248,35 +1158,51 @@ export class GoogleFxFlowTool extends BaseTool {
         }
 
         for (let attempt = 1; attempt <= 5; attempt++) {
-            // Strategy: Find the "+" (add_2 Create) button inside prompt bar container.
-            // From DOM inspection: class contains 'sc-e8425ea6-0', text is 'add_2\nCreate'
-            // The button is at bottom-right of the prompt box, NOT the top-header "+" button.
+            // The Expand button opens the Agent panel on the RIGHT side of the screen.
+            // The '+' (add_2/Create) button is in the BOTTOM of that right-side panel.
+            // Right panel: x > ~1180px, bottom bar: y > ~700px (in 1470x776 viewport)
             const coords = await page.evaluate(() => {
                 const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
-
-                // Primary: Find by text content "add_2" combined with "Create" (exact from DOM inspection)
                 const allBtns = Array.from(document.querySelectorAll('button, [role="button"]'));
 
+                // Primary: find '+'/add_2/Create button in the right-side Agent panel
                 let addBtn = allBtns.find(b => {
                     if (!isVisible(b)) return false;
                     const r = b.getBoundingClientRect();
-                    // Must be in the BOTTOM portion of the screen (prompt bar area)
-                    if (r.top < window.innerHeight - 250) return false;
+                    // Must be in RIGHT portion of screen (Agent panel) AND bottom area (panel bottom bar)
+                    if (r.left < window.innerWidth * 0.6) return false;
+                    if (r.top < window.innerHeight * 0.8) return false;
                     const txt = (b.innerText || b.textContent || '').trim();
-                    return txt.includes('add_2') || txt.includes('Create') || txt === '+';
+                    return txt.includes('add_2') || txt === '+' || txt.includes('Create');
                 });
 
-                // Fallback: Find prompt textarea, go up to parent container, pick first visible button
+                // Fallback 1: any '+' button in the right-side panel (relaxed y position)
                 if (!addBtn) {
-                    const promptBox = Array.from(document.querySelectorAll('textarea, [contenteditable]'))
-                        .find(el => isVisible(el) && (el.getAttribute('placeholder') || '').toLowerCase().includes('create'));
-                    if (promptBox) {
-                        let parent = promptBox.parentElement;
-                        for (let i = 0; i < 8 && parent; i++) {
+                    addBtn = allBtns.find(b => {
+                        if (!isVisible(b)) return false;
+                        const r = b.getBoundingClientRect();
+                        if (r.left < window.innerWidth * 0.6) return false;
+                        if (r.top < window.innerHeight * 0.7) return false;
+                        const cls = (b.className || '');
+                        return cls.includes('sc-e8425ea6-0') || (b.textContent || '').trim() === '+';
+                    });
+                }
+
+                // Fallback 2: find by traversing from the right-side textarea
+                if (!addBtn) {
+                    const rightTextbox = Array.from(document.querySelectorAll('textarea, [role="textbox"], [contenteditable="true"]'))
+                        .find(el => {
+                            if (!isVisible(el)) return false;
+                            const r = el.getBoundingClientRect();
+                            return r.left > window.innerWidth * 0.6;
+                        });
+                    if (rightTextbox) {
+                        let parent = rightTextbox.parentElement;
+                        for (let i = 0; i < 10 && parent; i++) {
                             const btns = Array.from(parent.querySelectorAll('button')).filter(b => {
                                 if (!isVisible(b)) return false;
                                 const r = b.getBoundingClientRect();
-                                return r.top > window.innerHeight - 250;
+                                return r.left > window.innerWidth * 0.6 && r.top > window.innerHeight * 0.7;
                             });
                             if (btns.length >= 1) { addBtn = btns[0]; break; }
                             parent = parent.parentElement;
@@ -2179,17 +2105,43 @@ export class GoogleFxFlowTool extends BaseTool {
         console.log(`      ✨ Avatar "${avatarName}" successfully added to prompt bar!`);
     }
 
-    async _submitPrompt(page, prompt) {
-        console.log(`      ⌨️ Submitting prompt into main bottom prompt bar...`);
+    async _logChatReplies(page, context = 'Chat') {
+        try {
+            const lines = await page.evaluate(() => {
+                const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+                const panels = Array.from(document.querySelectorAll('[class*="sc-e4f4e472-3"], [class*="cRumFH"], [class*="sc-b9afcbbb"], [class*="sc-5c3af813"]'))
+                    .filter(el => isVisible(el) && el.getBoundingClientRect().left > window.innerWidth * 0.4);
+                const container = panels[0] || document.body;
+                const text = container.innerText || '';
+                return text.split('\n').map(s => s.trim()).filter(s => s.length > 0);
+            });
+            if (lines && lines.length > 0) {
+                console.log(`\n      💬 AGENT CHAT REPLAY LOGS [${context}]:`);
+                console.log(`      ${'─'.repeat(55)}`);
+                lines.slice(-25).forEach(l => console.log(`      | ${l}`));
+                console.log(`      ${'─'.repeat(55)}\n`);
+            }
+        } catch (e) {}
+    }
 
-        // 1. Focus the main bottom prompt editor in DOM
+    async _submitPrompt(page, prompt) {
+        console.log(`      ⌨️ Submitting prompt into RIGHT-SIDE expanded Agent panel...`);
+
+        // 1. Focus the textbox in the RIGHT-SIDE expanded Agent panel (x > 60% of screen)
         const focused = await page.evaluate(() => {
             const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
-            const containers = Array.from(document.querySelectorAll('.sc-c9e4708a-0, .sc-5c3af813-0, [class*="sc-c9e4708a"], [class*="sc-5c3af813"]'))
-                .filter(c => isVisible(c) && !c.closest('.sc-e4f4e472-3'));
-            const bar = containers.length > 0 ? containers[containers.length - 1] : document.body;
 
-            const editor = bar.querySelector('[role="textbox"], [data-slate-editor="true"], textarea, div[contenteditable="true"]')
+            // Right-side panel textbox
+            const rightEditor = Array.from(document.querySelectorAll(
+                '[role="textbox"], [data-slate-editor="true"], textarea, div[contenteditable="true"]'
+            )).find(el => {
+                if (!isVisible(el)) return false;
+                const r = el.getBoundingClientRect();
+                return r.left > window.innerWidth * 0.6;
+            });
+
+            // Fallback to any editor
+            const editor = rightEditor
                 || document.querySelector('[role="textbox"], [data-slate-editor="true"], textarea, div[contenteditable="true"]');
 
             if (editor) {
@@ -2229,28 +2181,42 @@ export class GoogleFxFlowTool extends BaseTool {
 
         console.log(`      ✅ Prompt typed successfully into input bar`);
 
-        // 3. Click the Send/Create arrow button inside the prompt bar container
+        // 3. Click the Send (arrow_forward) button in the RIGHT-SIDE panel.
+        // NOTE: After typing, a '×' (close icon = "close") button appears in the textbox.
+        // That × button can be the rightmost element — we MUST match by icon text ONLY.
         const sendCoords = await page.evaluate(() => {
             const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
-            const containers = Array.from(document.querySelectorAll('.sc-c9e4708a-0, .sc-5c3af813-0, [class*="sc-c9e4708a"], [class*="sc-5c3af813"]'))
-                .filter(c => isVisible(c) && !c.closest('.sc-e4f4e472-3'));
-            const bar = containers.length > 0 ? containers[containers.length - 1] : document;
+            const allBtns = Array.from(document.querySelectorAll('button'));
 
-            const controlGroup = bar.querySelector('.sc-5c3af813-10, [class*="djtHPL"]') || bar;
-            const btns = Array.from(controlGroup.querySelectorAll('button'));
+            // All text tokens inside a button (checks every descendant)
+            const allTexts = b => Array.from(b.querySelectorAll('*'))
+                .map(c => (c.textContent || '').trim())
+                .concat([(b.textContent || '').trim()]);
 
-            const sendBtn = btns.find(b => {
+            // Is this the × clear button that appears after typing?
+            const isClearBtn = b => allTexts(b).some(t => t === 'close' || t === 'cancel' || t === 'clear');
+
+            // Strategy 1: arrow_forward icon in right panel, strictly exclude clear/close buttons
+            let sendBtn = allBtns.find(b => {
                 if (!isVisible(b)) return false;
-                const txt = (b.innerText || b.textContent || '').trim();
-                const hasArrow = Array.from(b.querySelectorAll('i, [class*="google-symbols"]'))
-                    .some(i => (i.textContent || '').trim() === 'arrow_forward');
-                return hasArrow || (txt.includes('Create') && !txt.includes('Agent'));
+                if (isClearBtn(b)) return false;
+                const r = b.getBoundingClientRect();
+                if (r.left < window.innerWidth * 0.5) return false;
+                if (r.top < window.innerHeight * 0.7) return false;
+                return allTexts(b).some(t => t === 'arrow_forward');
             });
+
+            // Strategy 2: page-wide arrow_forward button (relaxed position, still exclude clear)
+            if (!sendBtn) {
+                sendBtn = allBtns.find(b => {
+                    if (!isVisible(b)) return false;
+                    if (isClearBtn(b)) return false;
+                    return allTexts(b).some(t => t === 'arrow_forward');
+                });
+            }
 
             if (sendBtn) {
                 if (window.__highlight) window.__highlight(sendBtn);
-                sendBtn.click();
-                sendBtn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
                 const r = sendBtn.getBoundingClientRect();
                 return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2) };
             }
@@ -2266,6 +2232,9 @@ export class GoogleFxFlowTool extends BaseTool {
         }
 
         await page.waitForTimeout(3000);
+
+        // Log chat replay after prompt submission
+        await this._logChatReplies(page, 'After Prompt Submit');
 
         // Capture post-submit snapshot of all media URLs (including uploaded reference video in prompt history card)
         const postSubmitUrls = await page.evaluate(() => {
@@ -2531,6 +2500,7 @@ export class GoogleFxFlowTool extends BaseTool {
 
         let resultData = null;
         let pollCount = 0;
+        let retryCount = 0;
 
         // Apply filter ("Generated" ON, "Uploaded" OFF) once so uploaded reference media is hidden in feed
         await this._applyResultFilter(page);
@@ -2649,8 +2619,28 @@ export class GoogleFxFlowTool extends BaseTool {
                     videoUrl: newVideoUrl,
                     imageUrl: newImageUrl,
                     text: bodyText.substring(0, 3000),
+                    isCancelled: bodyText.includes('Response was cancelled') || bodyText.includes('response was cancelled'),
                 };
             }, { targetType: type, excludedUrls: Array.from(excludedUrlSet) });
+            // ── CANCELLATION CHECK: if Google cancelled the response, retry the prompt ──
+            if (liveState.isCancelled) {
+                console.warn(`      ⚠️ "Response was cancelled." detected — retrying prompt submission...`);
+                retryCount = (retryCount || 0) + 1;
+                if (retryCount > 3) {
+                    throw new Error('[GoogleFX] ❌ Prompt was cancelled 3 times — aborting.');
+                }
+                console.log(`      🔄 Retry attempt ${retryCount}/3 — re-submitting prompt...`);
+                await page.waitForTimeout(2000);
+                // Re-submit the prompt (prompt variable is captured in closure via _extractResult args)
+                // We use the stored _lastPrompt set before calling _extractResult
+                const retryPrompt = this._lastPrompt || '';
+                if (retryPrompt) {
+                    await this._submitPrompt(page, retryPrompt);
+                    await page.waitForTimeout(3000);
+                    lastActivityTime = Date.now(); // reset stale timer
+                    continue;
+                }
+            }
 
             // Log live percentage & status updates if present in DOM & reset activity timer
             if (liveState.currentPct !== null && liveState.currentPct !== lastProgressPct) {
@@ -2677,6 +2667,7 @@ export class GoogleFxFlowTool extends BaseTool {
                 lastActivityTime = Date.now();
                 if (pollCount % 3 === 0) {
                     console.log(`      🎬 Live UI Generation Progress: ${liveState.statusText || 'Generating video in progress...'} (${elapsedSec}s)`);
+                    await this._logChatReplies(page, `Polling #${pollCount}`);
                     if (itemId) {
                         try {
                             const jobsCol = getJobsCollection();

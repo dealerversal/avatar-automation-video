@@ -8,25 +8,6 @@ import { logger } from '../utils/logger.js';
 
 const router = Router();
 
-const generateSchema = Joi.object({
-    prompt: Joi.string().min(1).max(5000).required().messages({
-        'string.empty': 'Prompt cannot be empty',
-        'string.max': 'Prompt must be 5000 characters or less',
-        'any.required': 'prompt field is required',
-    }),
-    type: Joi.string().valid('video', 'image', 'avatar_video').optional().default('video'),
-    settings: Joi.object().optional().default({}),
-    mediaUrl: Joi.string().uri().optional().allow(null, '').messages({
-        'string.uri': 'mediaUrl must be a valid URL',
-    }),
-    imageUrl: Joi.string().uri().optional().allow(null, '').messages({
-        'string.uri': 'imageUrl must be a valid URL',
-    }),
-    avatarName: Joi.string().optional().allow(null, '').messages({
-        'string.base': 'avatarName must be a string',
-    }),
-}).unknown(true);
-
 const generateAvatarSchema = Joi.object({
     prompt: Joi.string().min(1).max(5000).required().messages({
         'string.empty': 'Prompt cannot be empty',
@@ -47,92 +28,16 @@ const generateAvatarSchema = Joi.object({
 }).unknown(true);
 
 /**
- * POST /api/fx-flow/generate (and POST /api/fx-flow)
- * Submits a new generation job to the in-memory queue and saves pending record to MongoDB
- */
-const handleGenerate = async (req, res) => {
-    const requestId = req.requestId;
-
-    const { error, value } = generateSchema.validate(req.body);
-    if (error) {
-        return res.status(400).json({
-            success: false,
-            error: error.details[0].message,
-            request_id: requestId,
-        });
-    }
-
-    const { prompt, type, settings, avatarName } = value;
-    const mediaUrl = value.mediaUrl || value.imageUrl || null;
-    const itemId = `gen_${uuidv4().replace(/-/g, '').substring(0, 12)}`;
-
-    logger.info(`[FxFlowRoute] [${requestId}] New ${type} request queued: "${prompt.substring(0, 60)}..." (itemId: ${itemId})`);
-
-    try {
-        const jobsCol = getJobsCollection();
-        const now = new Date();
-        const jobDoc = {
-            itemId,
-            type,
-            prompt,
-            settings,
-            mediaUrl,
-            imageUrl: mediaUrl,
-            avatarName: avatarName || null,
-            status: 'pending',
-            result: {
-                videoUrl: null,
-                imageUrl: null,
-                mediaUrls: [],
-                text: '',
-                rawHtml: '',
-            },
-            error: null,
-            durationMs: 0,
-            createdAt: now,
-            updatedAt: now,
-        };
-
-        await jobsCol.insertOne(jobDoc);
-
-        // Add to background in-memory queue
-        generationQueue.addJob({
-            itemId,
-            type,
-            prompt,
-            settings,
-            mediaUrl,
-            imageUrl: mediaUrl,
-            avatarName: avatarName || null,
-        });
-
-        return res.status(202).json({
-            success: true,
-            itemId,
-            status: 'pending',
-            type,
-            prompt,
-            settings,
-            mediaUrl,
-            imageUrl: mediaUrl,
-            avatarName: avatarName || null,
-            message: `Generation job queued successfully. Check status at /api/fx-flow/status/${itemId}`,
-            statusUrl: `/api/fx-flow/status/${itemId}`,
-            request_id: requestId,
-        });
-    } catch (err) {
-        logger.error(`[FxFlowRoute] [${requestId}] DB/Queue Error:`, err);
-        return res.status(500).json({
-            success: false,
-            error: err.message || 'Failed to enqueue generation job',
-            request_id: requestId,
-        });
-    }
-};
-
-/**
  * POST /api/fx-flow/generate-avatar-video
- * Submits a new avatar video generation job (uploads reference media if provided + selects account avatar "me")
+ * Submits a new avatar video generation job.
+ *
+ * Full automation flow:
+ *   1. Navigate to Google Flow → Create New Project
+ *   2. Enable Agent mode
+ *   3. Add account avatar ("me") to prompt
+ *   4. Upload reference image (mediaUrl/imageUrl), wait for upload to finish, add to prompt
+ *   5. Open Agent Settings → configure (aspect ratio, model, duration, confirm=Never) → Save
+ *   6. Submit prompt → monitor generation → return result
  */
 const handleGenerateAvatarVideo = async (req, res) => {
     const requestId = req.requestId;
@@ -217,8 +122,6 @@ const handleGenerateAvatarVideo = async (req, res) => {
 };
 
 router.post('/generate-avatar-video', handleGenerateAvatarVideo);
-router.post('/generate', handleGenerate);
-router.post('/', handleGenerate);
 
 /**
  * GET /api/fx-flow/status/:itemId
