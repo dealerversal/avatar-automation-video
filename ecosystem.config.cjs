@@ -3,7 +3,7 @@ module.exports = {
         {
             name: 'gen.socialversal.online',
             script: 'src/server.js',
-            cwd: '/root/projects/gen-ai-browser',
+            cwd: '/root/projects/avatar-automation-video',
             instances: 1,
             autorestart: true,
             watch: false,

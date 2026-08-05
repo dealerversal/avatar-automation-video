@@ -1,4 +1,4 @@
-name: Deploy Gen AI Browser VPS Server
+name: Deploy Avatar Automation Video VPS Server
 
 on:
   push:
@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: deploy-gen-ai-browser
+  group: deploy-avatar-automation-video
   cancel-in-progress: true
 
 jobs:
@@ -16,7 +16,7 @@ jobs:
     env:
       HOST: 72.60.118.141
       USER: root
-      PROJECT_PATH: /root/projects/gen-ai-browser
+      PROJECT_PATH: /root/projects/avatar-automation-video
       PROCESS_NAME: gen.socialversal.online
 
     steps:
