@@ -72,20 +72,19 @@ function parseCookiesInput(input) {
 }
 
 function normalizeCookie(cookie) {
-    let domain = cookie.domain || '.google.com';
-    if (!domain.startsWith('.')) {
-        domain = '.' + domain;
-    }
-    return {
+    const clean = {
         name: cookie.name,
         value: cookie.value,
-        domain: domain,
+        domain: cookie.domain || '.google.com',
         path: cookie.path || '/',
-        expires: cookie.expires || Math.floor(Date.now() / 1000) + 365 * 24 * 3600,
-        httpOnly: cookie.httpOnly !== undefined ? cookie.httpOnly : false,
-        secure: cookie.secure !== undefined ? cookie.secure : true,
-        sameSite: cookie.sameSite || 'Lax',
+        expires: cookie.expires && cookie.expires > 0 ? cookie.expires : Math.floor(Date.now() / 1000) + 365 * 24 * 3600,
+        httpOnly: Boolean(cookie.httpOnly),
+        secure: Boolean(cookie.secure),
     };
+    if (['Strict', 'Lax', 'None'].includes(cookie.sameSite)) {
+        clean.sameSite = cookie.sameSite;
+    }
+    return clean;
 }
 
 export class SessionManager {
@@ -195,7 +194,7 @@ export class SessionManager {
                 logger.warn('[SessionManager] Could not extract detailed user info: ' + e.message);
             }
 
-            const cookies = await context.cookies(['https://labs.google', 'https://google.com']);
+            const cookies = await context.cookies();
             const hasGoogleCookies = cookies.some((c) => c.name.includes('SID') || c.name.includes('HSID') || c.name.includes('SSID'));
 
             await context.close();
