@@ -9,6 +9,7 @@ import { config } from './config.js';
 import { connectDB } from './db.js';
 import { logger } from './utils/logger.js';
 import { registry } from './mcp/registry.js';
+import { generationQueue } from './queue/generationQueue.js';
 import fxFlowRouter from './routes/fxFlow.route.js';
 import sessionRouter from './routes/session.route.js';
 
@@ -89,6 +90,7 @@ app.use((err, _req, res, _next) => {
 async function startServer() {
     try {
         await connectDB();
+        await generationQueue.recoverPendingJobs();
         
         app.listen(config.port, () => {
             logger.info(`🚀 Google FX Flow Automation Server running on http://localhost:${config.port}`);

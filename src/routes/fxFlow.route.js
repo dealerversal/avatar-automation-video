@@ -57,6 +57,18 @@ const handleGenerateAvatarVideo = async (req, res) => {
     const mediaUrl = value.mediaUrl || value.imageUrl || null;
     const itemId = `gen_${uuidv4().replace(/-/g, '').substring(0, 12)}`;
 
+    console.log('\n' + '📥 '.repeat(25));
+    console.log(`📥 [FxFlowRoute] NEW AVATAR VIDEO REQUEST RECEIVED (Request ID: ${requestId})`);
+    console.log(`🆔 Item ID   : ${itemId}`);
+    console.log(`👤 Avatar Name: ${avatarName}`);
+    console.log(`🖼️ Media URL  : ${mediaUrl || 'None'}`);
+    console.log(`⚙️ Settings   : ${JSON.stringify(settings)}`);
+    console.log(`📏 Prompt Len : ${prompt.length} chars`);
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log('💬 EXACT FULL PROMPT RECEIVED IN API REQUEST:');
+    console.log(prompt);
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+
     logger.info(`[FxFlowRoute] [${requestId}] New avatar video request queued (avatarName: "${avatarName}"): "${prompt.substring(0, 60)}..." (itemId: ${itemId})`);
 
     try {
@@ -71,6 +83,7 @@ const handleGenerateAvatarVideo = async (req, res) => {
             imageUrl: mediaUrl,
             avatarName,
             status: 'pending',
+            retryCount: 0,
             result: {
                 videoUrl: null,
                 imageUrl: null,
@@ -95,6 +108,7 @@ const handleGenerateAvatarVideo = async (req, res) => {
             mediaUrl,
             imageUrl: mediaUrl,
             avatarName,
+            retryCount: 0,
         });
 
         return res.status(202).json({
@@ -154,6 +168,7 @@ router.get(['/status', '/status/:itemId'], async (req, res) => {
             status: job.status,
             type: job.type,
             avatarName: job.avatarName || 'me',
+            retryCount: job.retryCount || 0,
             genratedUrl,
             settings: job.settings,
             request_id: requestId,

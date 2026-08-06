@@ -9,6 +9,7 @@ import { BaseTool } from '../mcp/baseTool.js';
 import { config } from '../config.js';
 import { logger } from '../utils/logger.js';
 import { uploadToR2 } from '../services/r2Service.js';
+import { getJobsCollection } from '../db.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const GOOGLE_FX_URL = 'https://labs.google/fx/tools/flow';
@@ -385,6 +386,45 @@ export class GoogleFxFlowTool extends BaseTool {
             console.log(`📦  Total Assets: ${result.mediaUrls ? result.mediaUrls.length : 0}`);
             console.log('─'.repeat(60) + '\n');
             logger.info(`[GoogleFxFlowTool] Completed in ${totalMs}ms`);
+
+            // Immediately mark job as COMPLETED in MongoDB so status polling returns completed without delay
+            if (itemId) {
+                try {
+                    const jobsCol = getJobsCollection();
+                    const isVideoType = type === 'video' || type === 'avatar_video';
+                    const primaryVideoUrl = result.videoUrl || (result.mediaUrls && result.mediaUrls.find(url => url.includes('.mp4') || url.includes('video'))) || (result.mediaUrls && result.mediaUrls[0]) || null;
+                    const primaryImageUrl = result.imageUrl || (type === 'image' && result.mediaUrls && result.mediaUrls[0]) || null;
+                    const finalGenUrl = result.r2Url || primaryVideoUrl || primaryImageUrl || '';
+
+                    await jobsCol.updateOne(
+                        { itemId },
+                        {
+                            $set: {
+                                status: 'completed',
+                                genratedUrl: finalGenUrl,
+                                result: {
+                                    videoUrl: isVideoType ? primaryVideoUrl : null,
+                                    imageUrl: type === 'image' ? primaryImageUrl : null,
+                                    r2Url: result.r2Url || null,
+                                    r2Key: result.r2Key || null,
+                                    downloadPath: result.downloadPath || null,
+                                    downloadUrl: result.downloadUrl || null,
+                                    filename: result.filename || null,
+                                    mediaUrls: result.mediaUrls || [],
+                                    text: result.text || '',
+                                    rawHtml: result.html || '',
+                                },
+                                durationMs: totalMs,
+                                error: null,
+                                updatedAt: new Date(),
+                            },
+                        }
+                    );
+                    console.log(`      💾 [GoogleFX] Job "${itemId}" status updated to COMPLETED in MongoDB.`);
+                } catch (dbErr) {
+                    console.warn(`      ⚠️ Warning updating completion status in DB: ${dbErr.message}`);
+                }
+            }
 
             return {
                 success: true,
@@ -2172,15 +2212,27 @@ export class GoogleFxFlowTool extends BaseTool {
         await page.keyboard.insertText(prompt);
         await page.waitForTimeout(500);
 
-        // Backup DOM text insertion if editor appears empty
+        // Backup DOM text insertion if editor appears empty or truncated
         await page.evaluate((textToType) => {
-            const editors = Array.from(document.querySelectorAll('[role="textbox"], [data-slate-editor="true"], textarea, div[contenteditable="true"]'));
-            const mainEditor = editors.find(e => e.offsetWidth > 0 && !e.closest('.sc-e4f4e472-3'));
-            if (mainEditor && (mainEditor.innerText || '').trim() === '') {
-                const p = mainEditor.querySelector('p') || mainEditor;
-                p.textContent = textToType;
-                mainEditor.dispatchEvent(new Event('input', { bubbles: true }));
-                mainEditor.dispatchEvent(new Event('change', { bubbles: true }));
+            const active = document.activeElement;
+            const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+            const rightEditor = Array.from(document.querySelectorAll(
+                '[role="textbox"], [data-slate-editor="true"], textarea, div[contenteditable="true"]'
+            )).find(el => isVisible(el) && el.getBoundingClientRect().left > window.innerWidth * 0.5);
+
+            const targetEditor = active && isVisible(active) && (active.isContentEditable || active.tagName === 'TEXTAREA' || active.getAttribute('role') === 'textbox')
+                ? active
+                : (rightEditor || document.querySelector('[role="textbox"], [data-slate-editor="true"], textarea, div[contenteditable="true"]'));
+
+            if (targetEditor && (targetEditor.innerText || targetEditor.value || '').trim().length < textToType.trim().length * 0.8) {
+                if (targetEditor.tagName === 'TEXTAREA' || targetEditor.tagName === 'INPUT') {
+                    targetEditor.value = textToType;
+                } else {
+                    const p = targetEditor.querySelector('p') || targetEditor;
+                    p.textContent = textToType;
+                }
+                targetEditor.dispatchEvent(new Event('input', { bubbles: true }));
+                targetEditor.dispatchEvent(new Event('change', { bubbles: true }));
             }
         }, prompt);
 

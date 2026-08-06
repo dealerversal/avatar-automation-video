@@ -35,10 +35,14 @@ class GenerationQueue {
 
         console.log('\n' + '═'.repeat(60));
         console.log(`⚙️  [Queue Worker] Processing Job: ${itemId}`);
-        console.log(`🎬  Type: ${type} | Prompt: "${prompt.substring(0, 80)}..."`);
+        console.log(`🎬  Type: ${type} | Avatar: ${avatarName || 'me'} | Prompt Length: ${prompt ? prompt.length : 0} chars`);
         if (mediaUrl) console.log(`🖼️   Media URL: ${mediaUrl}`);
         if (avatarName) console.log(`👤  Avatar Name: ${avatarName}`);
-        console.log('═'.repeat(60));
+        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        console.log('💬 FULL QUEUED PROMPT TO BE EXECUTED:');
+        console.log(prompt);
+        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        console.log('═'.repeat(60) + '\n');
 
         const startTime = Date.now();
 
@@ -56,6 +60,7 @@ class GenerationQueue {
             const result = await tool.execute({ itemId, prompt, type, settings, mediaUrl, imageUrl: mediaUrl, avatarName });
 
             const durationMs = Date.now() - startTime;
+            const isVideoType = type === 'video' || type === 'avatar_video';
             const primaryVideoUrl = result.videoUrl || (result.mediaUrls && result.mediaUrls.find(url => url.includes('.mp4') || url.includes('video'))) || (result.mediaUrls && result.mediaUrls[0]) || null;
             const primaryImageUrl = result.imageUrl || (type === 'image' && result.mediaUrls && result.mediaUrls[0]) || null;
 
@@ -65,8 +70,9 @@ class GenerationQueue {
                 {
                     $set: {
                         status: 'completed',
+                        genratedUrl: result.r2Url || primaryVideoUrl || primaryImageUrl || '',
                         result: {
-                            videoUrl: type === 'video' ? primaryVideoUrl : null,
+                            videoUrl: isVideoType ? primaryVideoUrl : null,
                             imageUrl: type === 'image' ? primaryImageUrl : null,
                             r2Url: result.r2Url || null,
                             r2Key: result.r2Key || null,
@@ -91,30 +97,117 @@ class GenerationQueue {
             triggerServerRestart(3000);
         } catch (err) {
             const durationMs = Date.now() - startTime;
-            logger.error(`[Queue] Job ${itemId} failed:`, err);
-            console.error(`❌ [Queue Worker] Job ${itemId} FAILED: ${err.message}`);
-
+            const currentRetryCount = currentJobData.retryCount || 0;
+            const maxRetries = 2;
             const jobsCol = getJobsCollection();
-            await jobsCol.updateOne(
-                { itemId },
-                {
-                    $set: {
-                        status: 'failed',
-                        error: err.message || 'Generation failed',
-                        durationMs,
-                        updatedAt: new Date(),
-                    },
-                }
-            );
 
-            // Schedule server restart 3s after job failure & browser closed as well
-            triggerServerRestart(3000);
+            if (currentRetryCount < maxRetries) {
+                const nextRetryCount = currentRetryCount + 1;
+                logger.warn(`[Queue Worker] Job ${itemId} failed (Attempt ${currentRetryCount + 1}/${maxRetries + 1}). Triggering PM2 restart and scheduling retry #${nextRetryCount}/${maxRetries} in 10s. Error: ${err.message}`);
+                console.error(`\n⚠️  [Queue Worker] Job ${itemId} FAILED (Attempt ${currentRetryCount + 1}/${maxRetries + 1}): ${err.message}`);
+                console.log(`🔄 [Queue Worker] Triggering PM2 restart & scheduling Retry #${nextRetryCount} in 10 seconds...\n`);
+
+                await jobsCol.updateOne(
+                    { itemId },
+                    {
+                        $set: {
+                            status: 'retrying',
+                            retryCount: nextRetryCount,
+                            lastError: err.message || 'Generation failed',
+                            updatedAt: new Date(),
+                        },
+                    }
+                );
+
+                // 1. Trigger PM2 restart (or restart utility) before retry
+                triggerServerRestart(500);
+
+                // 2. Wait 10 seconds after PM2 restart before retrying request
+                await new Promise((resolve) => setTimeout(resolve, 10000));
+
+                // 3. Re-enqueue request for retry if process didn't restart immediately
+                if (!this.queue.some(j => j.itemId === itemId)) {
+                    this.addJob({
+                        ...currentJobData,
+                        retryCount: nextRetryCount,
+                    });
+                }
+            } else {
+                logger.error(`[Queue Worker] Job ${itemId} failed permanently after ${maxRetries} retries:`, err);
+                console.error(`\n❌ [Queue Worker] Job ${itemId} FAILED permanently after ${maxRetries} retries: ${err.message}\n`);
+
+                await jobsCol.updateOne(
+                    { itemId },
+                    {
+                        $set: {
+                            status: 'failed',
+                            error: err.message || 'Generation failed after max retries',
+                            retryCount: currentRetryCount,
+                            durationMs,
+                            updatedAt: new Date(),
+                        },
+                    }
+                );
+
+                // Schedule server restart 3s after final job failure
+                triggerServerRestart(3000);
+            }
         } finally {
             this.isProcessing = false;
             // Process remaining jobs in queue if any remain before restart executes
             if (this.queue.length > 0) {
                 setImmediate(() => this.processNext());
             }
+        }
+    }
+
+    /**
+     * Recovers pending or retrying jobs from MongoDB on server startup
+     */
+    async recoverPendingJobs() {
+        try {
+            const jobsCol = getJobsCollection();
+            const unfinishedJobs = await jobsCol
+                .find({ status: { $in: ['pending', 'retrying'] } })
+                .sort({ createdAt: 1 })
+                .toArray();
+
+            if (!unfinishedJobs || unfinishedJobs.length === 0) {
+                return;
+            }
+
+            logger.info(`[Queue] Found ${unfinishedJobs.length} pending/retrying job(s) in DB to recover.`);
+            console.log(`🔄 [Queue] Recovering ${unfinishedJobs.length} pending/retrying job(s) from database...`);
+
+            for (const job of unfinishedJobs) {
+                const jobData = {
+                    itemId: job.itemId,
+                    type: job.type,
+                    prompt: job.prompt,
+                    settings: job.settings,
+                    mediaUrl: job.mediaUrl || job.imageUrl || null,
+                    imageUrl: job.mediaUrl || job.imageUrl || null,
+                    avatarName: job.avatarName || 'me',
+                    retryCount: job.retryCount || 0,
+                };
+
+                if (job.status === 'retrying') {
+                    const elapsedMs = Date.now() - new Date(job.updatedAt || job.createdAt).getTime();
+                    const remainingWaitMs = Math.max(0, 10000 - elapsedMs);
+                    console.log(`⏳ [Queue Recovery] Job ${job.itemId} (Retry #${job.retryCount || 1}/2) waiting ${Math.round(remainingWaitMs / 1000)}s before executing retry...`);
+                    setTimeout(() => {
+                        if (!this.queue.some(j => j.itemId === job.itemId)) {
+                            this.addJob(jobData);
+                        }
+                    }, remainingWaitMs);
+                } else {
+                    if (!this.queue.some(j => j.itemId === job.itemId)) {
+                        this.addJob(jobData);
+                    }
+                }
+            }
+        } catch (err) {
+            logger.error(`[Queue] Error recovering pending/retrying jobs:`, err);
         }
     }
 
