@@ -19,7 +19,7 @@ export async function connectDB() {
         });
 
         await clientInstance.connect();
-        const dbName = config.mongodbName || 'avatar-automation-video-dev';
+        const dbName = config.mongodbName;
         dbInstance = clientInstance.db(dbName);
 
         // Create index on itemId
