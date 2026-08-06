@@ -19,7 +19,8 @@ export async function connectDB() {
         });
 
         await clientInstance.connect();
-        dbInstance = clientInstance.db('dv-content-genrator');
+        const dbName = config.mongodbName || 'avatar-automation-video-dev';
+        dbInstance = clientInstance.db(dbName);
 
         // Create index on itemId
         await dbInstance.collection('generation_jobs').createIndex({ itemId: 1 }, { unique: true });

@@ -2,6 +2,7 @@
 import { getJobsCollection } from '../db.js';
 import { registry } from '../mcp/registry.js';
 import { logger } from '../utils/logger.js';
+import { triggerServerRestart } from '../utils/restart.js';
 
 class GenerationQueue {
     constructor() {
@@ -85,6 +86,9 @@ class GenerationQueue {
 
             logger.info(`[Queue] Job ${itemId} completed successfully in ${durationMs}ms.`);
             console.log(`✅ [Queue Worker] Job ${itemId} COMPLETED in ${durationMs}ms`);
+
+            // Schedule server restart (PM2 on VPS / node --watch locally) 3s after browser closed & DB updated
+            triggerServerRestart(3000);
         } catch (err) {
             const durationMs = Date.now() - startTime;
             logger.error(`[Queue] Job ${itemId} failed:`, err);
@@ -102,9 +106,12 @@ class GenerationQueue {
                     },
                 }
             );
+
+            // Schedule server restart 3s after job failure & browser closed as well
+            triggerServerRestart(3000);
         } finally {
             this.isProcessing = false;
-            // Process remaining jobs in queue
+            // Process remaining jobs in queue if any remain before restart executes
             if (this.queue.length > 0) {
                 setImmediate(() => this.processNext());
             }
