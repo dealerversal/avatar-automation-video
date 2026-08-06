@@ -2272,7 +2272,7 @@ export class GoogleFxFlowTool extends BaseTool {
         } catch (e) {}
         await page.waitForTimeout(200);
 
-        // 3. Insert text cleanly via execCommand / input dispatching to preserve full multi-line text without truncation
+        // 3. Insert text cleanly via Paragraph Block Creation + Paste Event + ExecCommand to preserve full multi-line text without truncation
         const insertedInfo = await page.evaluate((textToType) => {
             const active = document.activeElement;
             const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
@@ -2284,28 +2284,52 @@ export class GoogleFxFlowTool extends BaseTool {
                 ? active
                 : (rightEditor || document.querySelector('[role="textbox"], [data-slate-editor="true"], textarea, div[contenteditable="true"]'));
 
-            if (targetEditor) {
-                targetEditor.focus();
-                if (targetEditor.tagName === 'TEXTAREA' || targetEditor.tagName === 'INPUT') {
-                    targetEditor.value = textToType;
+            if (!targetEditor) {
+                return { success: false, actualLen: 0, expectedLen: textToType.trim().length };
+            }
+
+            targetEditor.focus();
+
+            if (targetEditor.tagName === 'TEXTAREA' || targetEditor.tagName === 'INPUT') {
+                targetEditor.value = textToType;
+                targetEditor.dispatchEvent(new Event('input', { bubbles: true }));
+                targetEditor.dispatchEvent(new Event('change', { bubbles: true }));
+            } else {
+                // Method A: Dispatch Clipboard Event (Native Slate.js Multi-line Paste)
+                try {
+                    const dt = new DataTransfer();
+                    dt.setData('text/plain', textToType);
+                    const pasteEvent = new ClipboardEvent('paste', {
+                        clipboardData: dt,
+                        bubbles: true,
+                        cancelable: true
+                    });
+                    targetEditor.dispatchEvent(pasteEvent);
+                } catch (e) {}
+
+                // Check length after paste attempt
+                let currentLen = (targetEditor.innerText || targetEditor.textContent || '').trim().length;
+
+                // Method B: Slate.js Paragraph Node construction for 100% full multi-line coverage
+                if (currentLen < textToType.trim().length * 0.8) {
+                    targetEditor.innerHTML = '';
+                    const lines = textToType.split('\n');
+                    lines.forEach(line => {
+                        const p = document.createElement('p');
+                        // Use zero-width space for empty lines to preserve line breaks
+                        p.textContent = line || '\u200B';
+                        targetEditor.appendChild(p);
+                    });
                     targetEditor.dispatchEvent(new Event('input', { bubbles: true }));
                     targetEditor.dispatchEvent(new Event('change', { bubbles: true }));
-                } else {
-                    // For Slate.js / ContentEditable editors, use execCommand to insert entire text cleanly with all newlines
-                    document.execCommand('selectAll', false, null);
-                    const success = document.execCommand('insertText', false, textToType);
-                    if (!success || (targetEditor.innerText || '').trim().length < textToType.trim().length * 0.8) {
-                        targetEditor.innerText = textToType;
-                        targetEditor.dispatchEvent(new Event('input', { bubbles: true }));
-                    }
                 }
-                const actualLen = (targetEditor.innerText || targetEditor.value || '').trim().length;
-                return { success: true, actualLen, expectedLen: textToType.trim().length };
             }
-            return { success: false, actualLen: 0, expectedLen: textToType.trim().length };
+
+            const actualLen = (targetEditor.innerText || targetEditor.value || targetEditor.textContent || '').trim().length;
+            return { success: true, actualLen, expectedLen: textToType.trim().length };
         }, prompt);
 
-        // Fallback: If execCommand wasn't enough, use keyboard.insertText
+        // Fallback: If DOM insertion was incomplete, use keyboard.insertText
         if (!insertedInfo || !insertedInfo.success || insertedInfo.actualLen < prompt.trim().length * 0.8) {
             console.log(`      ⌨️ Fallback: Typing via keyboard.insertText (${prompt.length} chars)...`);
             await page.keyboard.insertText(prompt);
@@ -2316,7 +2340,12 @@ export class GoogleFxFlowTool extends BaseTool {
         // Final verification check of typed length
         const currentPromptLength = await page.evaluate(() => {
             const active = document.activeElement;
-            return (active ? (active.innerText || active.value || '') : '').trim().length;
+            const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+            const rightEditor = Array.from(document.querySelectorAll(
+                '[role="textbox"], [data-slate-editor="true"], textarea, div[contenteditable="true"]'
+            )).find(el => isVisible(el) && el.getBoundingClientRect().left > window.innerWidth * 0.5);
+            const target = active && isVisible(active) ? active : rightEditor;
+            return target ? (target.innerText || target.value || target.textContent || '').trim().length : 0;
         });
 
         console.log(`      ✅ Prompt typed successfully into input bar (${currentPromptLength} / ${prompt.length} chars)`);
