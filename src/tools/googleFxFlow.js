@@ -2263,12 +2263,17 @@ export class GoogleFxFlowTool extends BaseTool {
 
         await page.waitForTimeout(300);
 
-        // 2. Type prompt natively using keyboard API (avoids 'Element not attached to DOM' errors on React re-renders)
-        await page.keyboard.insertText(prompt);
-        await page.waitForTimeout(500);
+        // 2. Clear any existing text in the editor
+        const isMac = process.platform === 'darwin';
+        const modifier = isMac ? 'Meta' : 'Control';
+        try {
+            await page.keyboard.press(`${modifier}+A`);
+            await page.keyboard.press('Backspace');
+        } catch (e) {}
+        await page.waitForTimeout(200);
 
-        // Backup DOM text insertion if editor appears empty or truncated
-        await page.evaluate((textToType) => {
+        // 3. Insert text cleanly via execCommand / input dispatching to preserve full multi-line text without truncation
+        const insertedInfo = await page.evaluate((textToType) => {
             const active = document.activeElement;
             const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
             const rightEditor = Array.from(document.querySelectorAll(
@@ -2279,19 +2284,42 @@ export class GoogleFxFlowTool extends BaseTool {
                 ? active
                 : (rightEditor || document.querySelector('[role="textbox"], [data-slate-editor="true"], textarea, div[contenteditable="true"]'));
 
-            if (targetEditor && (targetEditor.innerText || targetEditor.value || '').trim().length < textToType.trim().length * 0.8) {
+            if (targetEditor) {
+                targetEditor.focus();
                 if (targetEditor.tagName === 'TEXTAREA' || targetEditor.tagName === 'INPUT') {
                     targetEditor.value = textToType;
+                    targetEditor.dispatchEvent(new Event('input', { bubbles: true }));
+                    targetEditor.dispatchEvent(new Event('change', { bubbles: true }));
                 } else {
-                    const p = targetEditor.querySelector('p') || targetEditor;
-                    p.textContent = textToType;
+                    // For Slate.js / ContentEditable editors, use execCommand to insert entire text cleanly with all newlines
+                    document.execCommand('selectAll', false, null);
+                    const success = document.execCommand('insertText', false, textToType);
+                    if (!success || (targetEditor.innerText || '').trim().length < textToType.trim().length * 0.8) {
+                        targetEditor.innerText = textToType;
+                        targetEditor.dispatchEvent(new Event('input', { bubbles: true }));
+                    }
                 }
-                targetEditor.dispatchEvent(new Event('input', { bubbles: true }));
-                targetEditor.dispatchEvent(new Event('change', { bubbles: true }));
+                const actualLen = (targetEditor.innerText || targetEditor.value || '').trim().length;
+                return { success: true, actualLen, expectedLen: textToType.trim().length };
             }
+            return { success: false, actualLen: 0, expectedLen: textToType.trim().length };
         }, prompt);
 
-        console.log(`      ✅ Prompt typed successfully into input bar`);
+        // Fallback: If execCommand wasn't enough, use keyboard.insertText
+        if (!insertedInfo || !insertedInfo.success || insertedInfo.actualLen < prompt.trim().length * 0.8) {
+            console.log(`      ⌨️ Fallback: Typing via keyboard.insertText (${prompt.length} chars)...`);
+            await page.keyboard.insertText(prompt);
+        }
+
+        await page.waitForTimeout(500);
+
+        // Final verification check of typed length
+        const currentPromptLength = await page.evaluate(() => {
+            const active = document.activeElement;
+            return (active ? (active.innerText || active.value || '') : '').trim().length;
+        });
+
+        console.log(`      ✅ Prompt typed successfully into input bar (${currentPromptLength} / ${prompt.length} chars)`);
 
         // 3. Click the Send (arrow_forward) button in the RIGHT-SIDE panel.
         // NOTE: After typing, a '×' (close icon = "close") button appears in the textbox.
