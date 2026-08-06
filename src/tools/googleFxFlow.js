@@ -2225,45 +2225,26 @@ export class GoogleFxFlowTool extends BaseTool {
     }
 
     async _submitPrompt(page, prompt) {
-        console.log(`      ⌨️ Submitting prompt into RIGHT-SIDE expanded Agent panel...`);
+        console.log(`      ⌨️ Submitting prompt into input bar (${prompt.length} chars)...`);
 
-        // 1. Focus the textbox in the RIGHT-SIDE expanded Agent panel (x > 60% of screen)
-        const focused = await page.evaluate(() => {
-            const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
-
-            // Right-side panel textbox
-            const rightEditor = Array.from(document.querySelectorAll(
-                '[role="textbox"], [data-slate-editor="true"], textarea, div[contenteditable="true"]'
-            )).find(el => {
-                if (!isVisible(el)) return false;
-                const r = el.getBoundingClientRect();
-                return r.left > window.innerWidth * 0.6;
-            });
-
-            // Fallback to any editor
-            const editor = rightEditor
-                || document.querySelector('[role="textbox"], [data-slate-editor="true"], textarea, div[contenteditable="true"]');
-
-            if (editor) {
-                editor.scrollIntoView({ block: 'center' });
-                editor.focus();
-                if (window.__highlight) window.__highlight(editor);
-                return true;
+        // 1. Find and click the text editor element cleanly
+        const editorLocator = page.locator('[role="textbox"], [data-slate-editor="true"], textarea, div[contenteditable="true"]').last();
+        try {
+            if (await editorLocator.isVisible({ timeout: 3000 }).catch(() => false)) {
+                await editorLocator.click();
+            } else {
+                await page.evaluate(() => {
+                    const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+                    const ed = Array.from(document.querySelectorAll('[role="textbox"], [data-slate-editor="true"], textarea, div[contenteditable="true"]'))
+                        .find(el => isVisible(el));
+                    if (ed) ed.focus();
+                });
             }
-            return false;
-        });
-
-        if (!focused) {
-            console.warn(`      ⚠️ Could not focus editor via container, searching page-wide...`);
-            const fallbackInput = await page.waitForSelector('[role="textbox"], [data-slate-editor="true"], textarea, div[contenteditable="true"]', { timeout: 4000 });
-            if (fallbackInput) {
-                await fallbackInput.click();
-            }
-        }
+        } catch (e) {}
 
         await page.waitForTimeout(300);
 
-        // 2. Clear any existing text in the editor
+        // 2. Select All and Backspace to clear existing text safely via keyboard
         const isMac = process.platform === 'darwin';
         const modifier = isMac ? 'Meta' : 'Control';
         try {
@@ -2272,110 +2253,40 @@ export class GoogleFxFlowTool extends BaseTool {
         } catch (e) {}
         await page.waitForTimeout(200);
 
-        // 3. Insert text cleanly via Paragraph Block Creation + Paste Event + ExecCommand to preserve full multi-line text without truncation
-        const insertedInfo = await page.evaluate((textToType) => {
-            const active = document.activeElement;
-            const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
-            const rightEditor = Array.from(document.querySelectorAll(
-                '[role="textbox"], [data-slate-editor="true"], textarea, div[contenteditable="true"]'
-            )).find(el => isVisible(el) && el.getBoundingClientRect().left > window.innerWidth * 0.5);
-
-            const targetEditor = active && isVisible(active) && (active.isContentEditable || active.tagName === 'TEXTAREA' || active.getAttribute('role') === 'textbox')
-                ? active
-                : (rightEditor || document.querySelector('[role="textbox"], [data-slate-editor="true"], textarea, div[contenteditable="true"]'));
-
-            if (!targetEditor) {
-                return { success: false, actualLen: 0, expectedLen: textToType.trim().length };
-            }
-
-            targetEditor.focus();
-
-            if (targetEditor.tagName === 'TEXTAREA' || targetEditor.tagName === 'INPUT') {
-                targetEditor.value = textToType;
-                targetEditor.dispatchEvent(new Event('input', { bubbles: true }));
-                targetEditor.dispatchEvent(new Event('change', { bubbles: true }));
-            } else {
-                // Method A: Dispatch Clipboard Event (Native Slate.js Multi-line Paste)
-                try {
-                    const dt = new DataTransfer();
-                    dt.setData('text/plain', textToType);
-                    const pasteEvent = new ClipboardEvent('paste', {
-                        clipboardData: dt,
-                        bubbles: true,
-                        cancelable: true
-                    });
-                    targetEditor.dispatchEvent(pasteEvent);
-                } catch (e) {}
-
-                // Check length after paste attempt
-                let currentLen = (targetEditor.innerText || targetEditor.textContent || '').trim().length;
-
-                // Method B: Slate.js Paragraph Node construction for 100% full multi-line coverage
-                if (currentLen < textToType.trim().length * 0.8) {
-                    targetEditor.innerHTML = '';
-                    const lines = textToType.split('\n');
-                    lines.forEach(line => {
-                        const p = document.createElement('p');
-                        // Use zero-width space for empty lines to preserve line breaks
-                        p.textContent = line || '\u200B';
-                        targetEditor.appendChild(p);
-                    });
-                    targetEditor.dispatchEvent(new Event('input', { bubbles: true }));
-                    targetEditor.dispatchEvent(new Event('change', { bubbles: true }));
-                }
-            }
-
-            const actualLen = (targetEditor.innerText || targetEditor.value || targetEditor.textContent || '').trim().length;
-            return { success: true, actualLen, expectedLen: textToType.trim().length };
-        }, prompt);
-
-        // Fallback: If DOM insertion was incomplete, use keyboard.insertText
-        if (!insertedInfo || !insertedInfo.success || insertedInfo.actualLen < prompt.trim().length * 0.8) {
-            console.log(`      ⌨️ Fallback: Typing via keyboard.insertText (${prompt.length} chars)...`);
-            await page.keyboard.insertText(prompt);
-        }
-
+        // 3. Type prompt using Playwright CDP trusted input (no execCommand, no innerHTML mutation)
+        // CDP keyboard.insertText updates Slate.js / React editor state 100% cleanly without DOM corruption
+        await page.keyboard.insertText(prompt);
         await page.waitForTimeout(500);
 
         // Final verification check of typed length
         const currentPromptLength = await page.evaluate(() => {
             const active = document.activeElement;
             const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
-            const rightEditor = Array.from(document.querySelectorAll(
-                '[role="textbox"], [data-slate-editor="true"], textarea, div[contenteditable="true"]'
-            )).find(el => isVisible(el) && el.getBoundingClientRect().left > window.innerWidth * 0.5);
-            const target = active && isVisible(active) ? active : rightEditor;
-            return target ? (target.innerText || target.value || target.textContent || '').trim().length : 0;
+            const ed = active && isVisible(active) ? active : Array.from(document.querySelectorAll('[role="textbox"], [data-slate-editor="true"], textarea, div[contenteditable="true"]')).find(el => isVisible(el));
+            return ed ? (ed.innerText || ed.value || ed.textContent || '').trim().length : 0;
         });
 
         console.log(`      ✅ Prompt typed successfully into input bar (${currentPromptLength} / ${prompt.length} chars)`);
 
-        // 3. Click the Send (arrow_forward) button in the RIGHT-SIDE panel.
-        // NOTE: After typing, a '×' (close icon = "close") button appears in the textbox.
-        // That × button can be the rightmost element — we MUST match by icon text ONLY.
+        // 4. Click Send (arrow_forward) button or press Enter
         const sendCoords = await page.evaluate(() => {
             const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
             const allBtns = Array.from(document.querySelectorAll('button'));
-
-            // All text tokens inside a button (checks every descendant)
             const allTexts = b => Array.from(b.querySelectorAll('*'))
                 .map(c => (c.textContent || '').trim())
                 .concat([(b.textContent || '').trim()]);
 
-            // Is this the × clear button that appears after typing?
             const isClearBtn = b => allTexts(b).some(t => t === 'close' || t === 'cancel' || t === 'clear');
 
-            // Strategy 1: arrow_forward icon in right panel, strictly exclude clear/close buttons
             let sendBtn = allBtns.find(b => {
                 if (!isVisible(b)) return false;
                 if (isClearBtn(b)) return false;
                 const r = b.getBoundingClientRect();
-                if (r.left < window.innerWidth * 0.5) return false;
-                if (r.top < window.innerHeight * 0.7) return false;
+                if (r.left < window.innerWidth * 0.4) return false;
+                if (r.top < window.innerHeight * 0.6) return false;
                 return allTexts(b).some(t => t === 'arrow_forward');
             });
 
-            // Strategy 2: page-wide arrow_forward button (relaxed position, still exclude clear)
             if (!sendBtn) {
                 sendBtn = allBtns.find(b => {
                     if (!isVisible(b)) return false;
@@ -2405,7 +2316,7 @@ export class GoogleFxFlowTool extends BaseTool {
         // Log chat replay after prompt submission
         await this._logChatReplies(page, 'After Prompt Submit');
 
-        // Capture post-submit snapshot of all media URLs (including uploaded reference video in prompt history card)
+        // Capture post-submit snapshot of all media URLs
         const postSubmitUrls = await page.evaluate(() => {
             const urls = new Set();
             document.querySelectorAll('img[src], video[src], video source[src], [src]').forEach(el => {
@@ -2420,241 +2331,8 @@ export class GoogleFxFlowTool extends BaseTool {
 
 
     async _applyResultFilter(page) {
-        console.log(`      🔍 Applying UI Filter: "Generated" ON, "Uploaded" OFF...`);
-        try {
-            // ── Step 1: Open the Filters panel ────────────────────────────────
-            // The filter button is the funnel icon button in the top header area.
-            // New UI: no text label, just an icon. Multiple selectors tried.
-            const filterPanelOpened = await page.evaluate(() => {
-                const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
-
-                // Check if filter panel is already open (has "Filters" heading visible)
-                const filtersHeading = Array.from(document.querySelectorAll('h2, h3, [class*="heading"], span, div'))
-                    .find(el => isVisible(el) && (el.innerText || el.textContent || '').trim() === 'Filters');
-                if (filtersHeading) return 'already_open';
-
-                // Try to find and click the filter button (funnel icon)
-                const allBtns = Array.from(document.querySelectorAll('button, [role="button"]'));
-
-                // Strategy 1: button with 'filter_list' or 'tune' or 'filter_alt' google icon
-                const iconBtn = allBtns.find(b => {
-                    if (!isVisible(b)) return false;
-                    const icons = Array.from(b.querySelectorAll('i, [class*="google-symbols"], [class*="material-icons"], svg'));
-                    return icons.some(i => {
-                        const t = (i.textContent || i.getAttribute('aria-label') || '').trim();
-                        return t === 'filter_list' || t === 'tune' || t === 'filter_alt' || t === 'filter';
-                    });
-                });
-                if (iconBtn) { iconBtn.click(); return 'clicked_icon'; }
-
-                // Strategy 2: button with aria-label containing filter/sort
-                const ariaBtn = allBtns.find(b => {
-                    if (!isVisible(b)) return false;
-                    const aria = (b.getAttribute('aria-label') || '').toLowerCase();
-                    return aria.includes('filter') || aria.includes('sort');
-                });
-                if (ariaBtn) { ariaBtn.click(); return 'clicked_aria'; }
-
-                // Strategy 3: button in header area (top 80px) that is not search/settings/add
-                const headerBtns = allBtns.filter(b => {
-                    if (!isVisible(b)) return false;
-                    const rect = b.getBoundingClientRect();
-                    if (rect.top > 80) return false; // must be in header
-                    const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
-                    // exclude known non-filter buttons
-                    return !txt.includes('new') && !txt.includes('add') && !txt.includes('agent') &&
-                           !txt.includes('help') && !txt.includes('settings') &&
-                           rect.width < 100; // filter btn is compact (icon only)
-                });
-                // Pick the rightmost header button (filter is usually on the right side)
-                if (headerBtns.length > 0) {
-                    const rightmost = headerBtns.reduce((a, b) => {
-                        const ar = a.getBoundingClientRect(), br = b.getBoundingClientRect();
-                        return ar.left > br.left ? a : b;
-                    });
-                    rightmost.click();
-                    return 'clicked_header';
-                }
-
-                return false;
-            });
-
-            if (!filterPanelOpened) {
-                console.warn(`      ⚠️ Could not find filter button — skipping filter apply`);
-                return;
-            }
-
-            console.log(`      ✅ Filter panel: ${filterPanelOpened}`);
-            await page.waitForTimeout(800); // wait for panel animation
-
-            // ── Step 2: Verify panel is open, then set Generated=ON, Uploaded=OFF ───
-            const filterResult = await page.evaluate(() => {
-                const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
-
-                // Find all clickable items in the Filters panel
-                // New UI uses label+checkbox combos or div-based items
-                const findCheckboxItem = (labelText) => {
-                    // Strategy A: <label> containing text
-                    const labels = Array.from(document.querySelectorAll('label'));
-                    const matchedLabel = labels.find(l => {
-                        if (!isVisible(l)) return false;
-                        const txt = (l.innerText || l.textContent || '').trim();
-                        return txt === labelText || txt.startsWith(labelText);
-                    });
-                    if (matchedLabel) return { el: matchedLabel, type: 'label' };
-
-                    // Strategy B: Any visible element whose TEXT exactly matches
-                    const allEls = Array.from(document.querySelectorAll(
-                        'button, [role="checkbox"], [role="menuitem"], [role="option"], div, span'
-                    ));
-                    const textMatch = allEls.find(el => {
-                        if (!isVisible(el)) return false;
-                        const ownText = (el.childNodes && Array.from(el.childNodes)
-                            .filter(n => n.nodeType === 3)
-                            .map(n => n.textContent.trim())
-                            .join('')) || (el.innerText || '').trim();
-                        return ownText === labelText;
-                    });
-                    if (textMatch) return { el: textMatch, type: 'text' };
-
-                    // Strategy C: Broader text search
-                    const broadMatch = allEls.find(el => {
-                        if (!isVisible(el)) return false;
-                        const txt = (el.innerText || el.textContent || '').trim();
-                        return txt === labelText || (txt.startsWith(labelText) && txt.length < labelText.length + 10);
-                    });
-                    if (broadMatch) return { el: broadMatch, type: 'broad' };
-
-                    return null;
-                };
-
-                const isItemChecked = (item) => {
-                    if (!item) return false;
-                    const el = item.el;
-
-                    // Check associated input[type=checkbox]
-                    const inputId = el.getAttribute('for');
-                    if (inputId) {
-                        const input = document.getElementById(inputId);
-                        if (input) return input.checked;
-                    }
-                    const siblingInput = el.querySelector('input[type="checkbox"]');
-                    if (siblingInput) return siblingInput.checked;
-
-                    // Check aria-checked
-                    const ariaChecked = el.getAttribute('aria-checked');
-                    if (ariaChecked !== null) return ariaChecked === 'true';
-
-                    // Check data-state
-                    const dataState = el.getAttribute('data-state');
-                    if (dataState) return dataState === 'checked' || dataState === 'on';
-
-                    // Check for check_box vs check_box_outline_blank icon text
-                    const icons = Array.from(el.querySelectorAll('i, [class*="google-symbols"], [class*="material-icons"]'));
-                    const iconText = icons.map(i => (i.textContent || '').trim()).join(' ');
-                    if (iconText.includes('check_box') && !iconText.includes('outline_blank')) return true;
-                    if (iconText.includes('check_box_outline_blank')) return false;
-
-                    // Check background/fill color of checkbox svg or shape
-                    const svgs = Array.from(el.querySelectorAll('svg rect, svg path'));
-                    // No reliable way without computed styles in evaluate context
-
-                    // Fallback: check class names for selected/active/checked state
-                    const cls = (el.className || '').toLowerCase();
-                    return cls.includes('selected') || cls.includes('active') || cls.includes('checked');
-                };
-
-                const genItem = findCheckboxItem('Generated');
-                const upItem = findCheckboxItem('Uploaded');
-
-                const result = {
-                    genFound: !!genItem,
-                    upFound: !!upItem,
-                    genWasChecked: isItemChecked(genItem),
-                    upWasChecked: isItemChecked(upItem),
-                    genClicked: false,
-                    upClicked: false,
-                };
-
-                // Ensure Generated is CHECKED
-                if (genItem && !result.genWasChecked) {
-                    if (window.__highlight) window.__highlight(genItem.el);
-                    genItem.el.click();
-                    result.genClicked = true;
-                }
-
-                // Ensure Uploaded is UNCHECKED
-                if (upItem && result.upWasChecked) {
-                    if (window.__highlight) window.__highlight(upItem.el);
-                    upItem.el.click();
-                    result.upClicked = true;
-                }
-
-                return result;
-            });
-
-            console.log(`      📊 Filter state: Generated [found=${filterResult.genFound}, wasChecked=${filterResult.genWasChecked}, clicked=${filterResult.genClicked}] | Uploaded [found=${filterResult.upFound}, wasChecked=${filterResult.upWasChecked}, clicked=${filterResult.upClicked}]`);
-
-            await page.waitForTimeout(500);
-
-            // ── Step 3: If items not found via JS, try Playwright locators ────────────
-            if (!filterResult.genFound || !filterResult.upFound) {
-                console.log(`      ⚠️ JS strategy missed items — trying Playwright locators...`);
-
-                // Try to find "Generated" label/button using Playwright text matching
-                try {
-                    const genLocator = page.locator('text=Generated').first();
-                    if (await genLocator.isVisible({ timeout: 2000 }).catch(() => false)) {
-                        // Check if it's unchecked by looking for associated checkbox
-                        const genParent = genLocator.locator('..');
-                        const checkbox = genParent.locator('input[type="checkbox"]').first();
-                        const isChecked = await checkbox.isChecked({ timeout: 1000 }).catch(() => false);
-                        if (!isChecked) {
-                            await genLocator.click({ timeout: 2000 }).catch(() => {});
-                            console.log(`      ✅ Clicked "Generated" via Playwright locator`);
-                        }
-                    }
-                } catch (e) {
-                    console.warn(`      ⚠️ Playwright "Generated" locator failed: ${e.message}`);
-                }
-
-                try {
-                    const upLocator = page.locator('text=Uploaded').first();
-                    if (await upLocator.isVisible({ timeout: 2000 }).catch(() => false)) {
-                        const upParent = upLocator.locator('..');
-                        const checkbox = upParent.locator('input[type="checkbox"]').first();
-                        const isChecked = await checkbox.isChecked({ timeout: 1000 }).catch(() => false);
-                        if (isChecked) {
-                            await upLocator.click({ timeout: 2000 }).catch(() => {});
-                            console.log(`      ✅ Clicked "Uploaded" via Playwright locator (to uncheck)`);
-                        }
-                    }
-                } catch (e) {
-                    console.warn(`      ⚠️ Playwright "Uploaded" locator failed: ${e.message}`);
-                }
-                await page.waitForTimeout(500);
-            }
-
-            // ── Step 4: Close the Filters panel ───────────────────────────────
-            // Click outside the panel or press Escape
-            await page.keyboard.press('Escape');
-            await page.waitForTimeout(600);
-
-            // Verify panel closed; if not, click elsewhere
-            const panelStillOpen = await page.evaluate(() => {
-                return Array.from(document.querySelectorAll('h2, h3, span, div'))
-                    .some(el => el.offsetWidth > 0 && (el.innerText || el.textContent || '').trim() === 'Filters');
-            });
-            if (panelStillOpen) {
-                console.log(`      ⚠️ Panel still open after Escape — clicking elsewhere to close...`);
-                await page.mouse.click(200, 400).catch(() => {});
-                await page.waitForTimeout(400);
-            }
-
-            console.log(`      ✅ Filter applied: Generated ON, Uploaded OFF`);
-        } catch (err) {
-            console.warn(`      ⚠️ Error in _applyResultFilter: ${err.message}`);
-        }
+        // UI filter button step skipped as requested (relying 100% on pre/post-submit URL snapshot exclusions)
+        return;
     }
 
 
