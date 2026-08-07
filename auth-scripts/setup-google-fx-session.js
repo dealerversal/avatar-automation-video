@@ -98,6 +98,14 @@ async function runSetup() {
     });
 
     console.log('\n💾 Saving session profile...');
+    try {
+        const state = await context.storageState();
+        fs.writeFileSync(path.join(profileDir, 'storageState.json'), JSON.stringify(state, null, 2));
+        fs.writeFileSync(path.join(profileDir, 'cookies.json'), JSON.stringify(state.cookies || [], null, 2));
+        console.log(`🍪 Exported ${state.cookies?.length || 0} decrypted cookies to storageState.json & cookies.json`);
+    } catch (expErr) {
+        console.warn(`⚠️ Could not export storageState: ${expErr.message}`);
+    }
     await context.close();
 
     // Clean ONLY heavy temporary media/script caches (preserve ServiceWorker & LocalStorage & IndexedDB)

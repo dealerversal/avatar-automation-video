@@ -1,6 +1,6 @@
 // src/tools/googleFxFlow.js
 import { chromium } from 'playwright';
-import { existsSync, mkdirSync, writeFileSync, unlinkSync, createWriteStream } from 'fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, createWriteStream } from 'fs';
 import https from 'https';
 import http from 'http';
 import path from 'path';
@@ -141,6 +141,31 @@ export class GoogleFxFlowTool extends BaseTool {
                 });
             } catch (e1) {
                 sharedContext = await chromium.launchPersistentContext(profileDir, launchOptions);
+            }
+
+            // Auto-inject decrypted cookies if cookies.json or storageState.json exists in profileDir
+            const cookiesJsonPath = path.join(profileDir, 'cookies.json');
+            const storageStateJsonPath = path.join(profileDir, 'storageState.json');
+            if (existsSync(cookiesJsonPath)) {
+                try {
+                    const cData = JSON.parse(readFileSync(cookiesJsonPath, 'utf8'));
+                    if (Array.isArray(cData) && cData.length > 0) {
+                        await sharedContext.addCookies(cData);
+                        logger.info(`[GoogleFX] Injected ${cData.length} cookies from cookies.json into sharedContext.`);
+                    }
+                } catch (e) {
+                    logger.warn('[GoogleFX] Could not inject cookies.json:', e.message);
+                }
+            } else if (existsSync(storageStateJsonPath)) {
+                try {
+                    const sData = JSON.parse(readFileSync(storageStateJsonPath, 'utf8'));
+                    if (sData.cookies && Array.isArray(sData.cookies) && sData.cookies.length > 0) {
+                        await sharedContext.addCookies(sData.cookies);
+                        logger.info(`[GoogleFX] Injected ${sData.cookies.length} cookies from storageState.json into sharedContext.`);
+                    }
+                } catch (e) {
+                    logger.warn('[GoogleFX] Could not inject storageState.json:', e.message);
+                }
             }
 
             await sharedContext.addInitScript(() => {

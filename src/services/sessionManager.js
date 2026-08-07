@@ -1,6 +1,6 @@
 // src/services/sessionManager.js
 import { chromium } from 'playwright';
-import { existsSync, mkdirSync, rmSync } from 'fs';
+import { existsSync, mkdirSync, rmSync, readFileSync, writeFileSync } from 'fs';
 import path from 'path';
 import { config } from '../config.js';
 import { logger } from '../utils/logger.js';
@@ -128,6 +128,31 @@ export class SessionManager {
                 });
             } catch (cErr) {
                 context = await chromium.launchPersistentContext(profileDir, checkOptions);
+            }
+
+            // Auto-inject decrypted cookies if cookies.json or storageState.json exists in profileDir
+            const cookiesJsonPath = path.join(profileDir, 'cookies.json');
+            const storageStateJsonPath = path.join(profileDir, 'storageState.json');
+            if (existsSync(cookiesJsonPath)) {
+                try {
+                    const cData = JSON.parse(readFileSync(cookiesJsonPath, 'utf8'));
+                    if (Array.isArray(cData) && cData.length > 0) {
+                        await context.addCookies(parseCookiesInput(cData));
+                        logger.info(`[SessionManager] Injected ${cData.length} cookies from cookies.json into context.`);
+                    }
+                } catch (e) {
+                    logger.warn('[SessionManager] Could not inject cookies.json:', e.message);
+                }
+            } else if (existsSync(storageStateJsonPath)) {
+                try {
+                    const sData = JSON.parse(readFileSync(storageStateJsonPath, 'utf8'));
+                    if (sData.cookies && Array.isArray(sData.cookies) && sData.cookies.length > 0) {
+                        await context.addCookies(parseCookiesInput(sData.cookies));
+                        logger.info(`[SessionManager] Injected ${sData.cookies.length} cookies from storageState.json into context.`);
+                    }
+                } catch (e) {
+                    logger.warn('[SessionManager] Could not inject storageState.json:', e.message);
+                }
             }
 
             await context.addInitScript(() => {
