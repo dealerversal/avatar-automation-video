@@ -363,6 +363,7 @@ export class GoogleFxFlowTool extends BaseTool {
 
             // 4. Add account Avatar to prompt
             if (effectiveAvatarName) {
+                this._lastAvatarName = effectiveAvatarName; // store for error retries
                 // Ensure session drawer is open — it may have closed after previous UI interactions
                 console.log(`\n[4/7] 🔲 Ensuring session drawer is open before avatar selection...`);
                 await this._clickExpandButton(page);
@@ -374,6 +375,7 @@ export class GoogleFxFlowTool extends BaseTool {
             // 5. Upload reference image/media to prompt
             let uploadedMediaUrls = [];
             if (effectiveMediaUrl) {
+                this._lastMediaUrl = effectiveMediaUrl; // store for error retries
                 console.log(`\n[5/7] 🖼️ [STEP 2/2] Uploading reference media from URL, waiting for upload to finish...`);
                 uploadedMediaUrls = await this._uploadMediaFromUrl(page, effectiveMediaUrl, itemId);
                 console.log(`      🔒 Uploaded media URLs captured for exclusion: ${uploadedMediaUrls.length}`);
@@ -2525,11 +2527,16 @@ export class GoogleFxFlowTool extends BaseTool {
                 });
 
                 // Detect Google's "Something went wrong" error UI
-                const isGoogleError = bodyText.includes('Something went wrong') ||
-                                      bodyText.includes('something went wrong') ||
-                                      (bodyText.includes('Try again') && bodyText.includes('What do you want to create'));
+                // PRIMARY signal: visible "Try again" button (the only reliable UI indicator)
+                // AVOID relying on bodyText — chat replay text can include error message strings
                 const hasTryAgainBtn = !!Array.from(document.querySelectorAll('button')).find(b =>
                     b.offsetWidth > 0 && (b.innerText || b.textContent || '').trim().toLowerCase() === 'try again'
+                );
+                // Secondary check: "error" label + "Something went wrong" text near the "Try again" button
+                // Only count as error if the Try Again button is actually visible
+                const isGoogleError = hasTryAgainBtn && (
+                    bodyText.includes('Something went wrong') ||
+                    bodyText.includes('something went wrong')
                 );
 
                 return {
@@ -2547,14 +2554,16 @@ export class GoogleFxFlowTool extends BaseTool {
                 };
             }, { targetType: type, excludedUrls: Array.from(excludedUrlSet) });
             // ── GOOGLE ERROR CHECK: "Something went wrong. Try again." ──
-            if (liveState.isGoogleError) {
+            // Only trigger on VISIBLE "Try again" button — NOT on chat text containing those words
+            if (liveState.isGoogleError && liveState.hasTryAgainBtn) {
                 console.warn(`      ⚠️ "Something went wrong" detected in Google Flow UI!`);
                 retryCount = (retryCount || 0) + 1;
                 if (retryCount > 3) {
                     throw new Error('[GoogleFX] ❌ "Something went wrong" error repeated 3 times — aborting.');
                 }
-                console.log(`      🔄 Google error retry ${retryCount}/3 — clicking "Try again" and re-submitting...`);
-                // Auto-click the "Try again" button if visible in the UI
+                console.log(`      🔄 Google error retry ${retryCount}/3 — restoring state and re-submitting...`);
+
+                // Auto-click the "Try again" button to reset the error state
                 if (liveState.hasTryAgainBtn) {
                     await page.evaluate(() => {
                         const btn = Array.from(document.querySelectorAll('button')).find(b =>
@@ -2565,6 +2574,59 @@ export class GoogleFxFlowTool extends BaseTool {
                     console.log(`      🖱️ Clicked "Try again" button.`);
                     await page.waitForTimeout(3000);
                 }
+
+                // Ensure session drawer is open before re-adding attachments
+                await this._clickExpandButton(page);
+                await page.waitForTimeout(800);
+
+                // Check if avatar thumbnail is still in the prompt bar
+                // If avatar was cleared by "Try again", re-add it
+                const avatarStillAttached = await page.evaluate(() => {
+                    const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+                    // Look for avatar thumbnail in prompt bar area (right side, bottom area)
+                    const promptArea = Array.from(document.querySelectorAll('[role="textbox"], [contenteditable="true"]'))
+                        .find(el => isVisible(el) && el.getBoundingClientRect().left > window.innerWidth * 0.6);
+                    if (!promptArea) return false;
+                    // Check for img thumbnail near the prompt bar
+                    let container = promptArea.parentElement;
+                    for (let i = 0; i < 8 && container; i++) {
+                        const imgs = container.querySelectorAll('img');
+                        if (imgs.length > 0) return true;
+                        container = container.parentElement;
+                    }
+                    return false;
+                });
+
+                const retryAvatarName = this._lastAvatarName || '';
+                const retryMediaUrl = this._lastMediaUrl || '';
+
+                if (!avatarStillAttached && retryAvatarName) {
+                    console.log(`      👤 Avatar not in prompt bar — re-adding avatar "${retryAvatarName}"...`);
+                    try {
+                        await this._addAvatarToPrompt(page, retryAvatarName);
+                        await page.waitForTimeout(1000);
+                    } catch (avatarErr) {
+                        console.warn(`      ⚠️ Could not re-add avatar: ${avatarErr.message}`);
+                    }
+                } else if (avatarStillAttached) {
+                    console.log(`      ✅ Avatar still attached in prompt bar — skipping re-add`);
+                }
+
+                // Re-upload media if available (media gets cleared on "Try again")
+                if (retryMediaUrl) {
+                    console.log(`      🖼️ Re-uploading reference media for retry...`);
+                    try {
+                        await this._uploadMediaFromUrl(page, retryMediaUrl, null);
+                        await page.waitForTimeout(1000);
+                    } catch (uploadErr) {
+                        console.warn(`      ⚠️ Could not re-upload media: ${uploadErr.message}`);
+                    }
+                }
+
+                // Ensure session drawer open again after panel interactions
+                await this._clickExpandButton(page);
+                await page.waitForTimeout(500);
+
                 const retryPrompt = this._lastPrompt || '';
                 if (retryPrompt) {
                     await this._submitPrompt(page, retryPrompt);
