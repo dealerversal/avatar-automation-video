@@ -127,6 +127,14 @@ export class GoogleFxFlowTool extends BaseTool {
                     '--disable-dev-shm-usage',
                     '--no-first-run',
                     '--no-default-browser-check',
+                    // ── VPS headless stability: enforce consistent viewport & font rendering ──
+                    '--window-size=1280,800',
+                    '--force-device-scale-factor=1',
+                    '--hide-scrollbars',
+                    '--mute-audio',
+                    '--disable-background-timer-throttling',
+                    '--disable-backgrounding-occluded-windows',
+                    '--disable-renderer-backgrounding',
                 ],
                 viewport: { width: 1280, height: 800 },
                 userAgent:
@@ -355,7 +363,11 @@ export class GoogleFxFlowTool extends BaseTool {
 
             // 4. Add account Avatar to prompt
             if (effectiveAvatarName) {
-                console.log(`\n[4/7] 👤 [STEP 1/2] Selecting Avatar "${effectiveAvatarName}" and adding to prompt...`);
+                // Ensure session drawer is open — it may have closed after previous UI interactions
+                console.log(`\n[4/7] 🔲 Ensuring session drawer is open before avatar selection...`);
+                await this._clickExpandButton(page);
+                await page.waitForTimeout(500);
+                console.log(`      👤 [STEP 1/2] Selecting Avatar "${effectiveAvatarName}" and adding to prompt...`);
                 await this._addAvatarToPrompt(page, effectiveAvatarName);
             }
 
@@ -389,7 +401,11 @@ export class GoogleFxFlowTool extends BaseTool {
             console.log(`      📸 Pre-submit snapshot: ${preExistingUrls.length} existing media URLs captured (will be excluded from result)`);
 
             // 7. Enter Prompt & Submit
-            console.log(`\n[7/7] ⌨️ Submitting prompt into generation bar...`);
+            // Ensure session drawer is open — it can close after media panel or settings panel interactions
+            console.log(`\n[7/7] 🔲 Ensuring session drawer is open before prompt submission...`);
+            await this._clickExpandButton(page);
+            await page.waitForTimeout(800);
+            console.log(`      ⌨️ Submitting prompt into generation bar...`);
             this._lastPrompt = cleanPrompt; // store for cancellation retry in _extractResult
             const postSubmitUrls = await this._submitPrompt(page, cleanPrompt);
             console.log(`      ✅ Prompt submitted!`);
@@ -765,14 +781,26 @@ export class GoogleFxFlowTool extends BaseTool {
     /**
      * Clicks the "Expand" (expand_content icon) button in the prompt bar if visible.
      * Opens the full-screen Agent session panel on the right side of the screen.
-     * Class: sc-c4e423a0-3, Icon text: "expand_content"
+     * Class: sc-c4e423a0-3 / ewxUEp, Icon text: "expand_content"
+     * This button appears ONLY when the session drawer is closed (collapsed).
+     * Called before avatar add, before media upload, and before prompt submit.
      */
     async _clickExpandButton(page) {
         console.log(`      🔲 Checking Expand button to open Agent panel...`);
 
-        // Check if panel is already expanded
+        // Check if panel is already expanded:
+        // The surest sign is a right-side textbox (x > 60%) OR session panel header on right
         const alreadyExpanded = await page.evaluate(() => {
             const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+            // Check 1: Right-side prompt input (textbox at x > 60% of viewport = panel open)
+            const hasRightInput = Array.from(document.querySelectorAll('[role="textbox"], [contenteditable="true"], textarea'))
+                .some(el => {
+                    if (!isVisible(el)) return false;
+                    const r = el.getBoundingClientRect();
+                    return r.left > window.innerWidth * 0.6;
+                });
+            if (hasRightInput) return true;
+            // Check 2: Session header with text "session" on right side
             const panelHeader = Array.from(document.querySelectorAll('[class*="sc-"]'))
                 .find(el => isVisible(el) && (el.innerText || '').toLowerCase().includes('session') && el.getBoundingClientRect().right > window.innerWidth * 0.7);
             return !!panelHeader;
@@ -783,35 +811,37 @@ export class GoogleFxFlowTool extends BaseTool {
             return;
         }
 
-        for (let attempt = 1; attempt <= 3; attempt++) {
+        console.log(`      🔓 Session panel CLOSED — clicking Expand button to open it...`);
+
+        for (let attempt = 1; attempt <= 4; attempt++) {
             const coords = await page.evaluate(() => {
                 const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
 
-                // Strategy 1: Find by class sc-c4e423a0-3 / ewxUEp and expand_content icon
+                // Strategy 1: Find by exact class sc-c4e423a0-3 / ewxUEp + expand_content icon
                 let btn = Array.from(document.querySelectorAll('button')).find(b => {
                     if (!isVisible(b)) return false;
                     const cls = b.className || '';
                     const hasClassMatch = cls.includes('sc-c4e423a0-3') || cls.includes('ewxUEp');
-                    const hasExpandIcon = Array.from(b.querySelectorAll('*'))
-                        .some(el => (el.textContent || '').trim() === 'expand_content' || (el.textContent || '').trim() === 'Expand');
+                    const hasExpandIcon = Array.from(b.querySelectorAll('i, span, *'))
+                        .some(el => (el.textContent || '').trim() === 'expand_content');
                     return hasClassMatch && hasExpandIcon;
                 });
 
-                // Strategy 2: Any button with expand_content icon
+                // Strategy 2: Any visible button with expand_content icon text
                 if (!btn) {
                     btn = Array.from(document.querySelectorAll('button')).find(b => {
                         if (!isVisible(b)) return false;
-                        return Array.from(b.querySelectorAll('*'))
+                        return Array.from(b.querySelectorAll('i, span, *'))
                             .some(el => (el.textContent || '').trim() === 'expand_content');
                     });
                 }
 
-                // Strategy 3: Find by span text "Expand"
+                // Strategy 3: Button with accessible label span text "Expand"
                 if (!btn) {
                     btn = Array.from(document.querySelectorAll('button')).find(b => {
                         if (!isVisible(b)) return false;
-                        const spans = Array.from(b.querySelectorAll('span'));
-                        return spans.some(s => (s.textContent || '').trim() === 'Expand');
+                        return Array.from(b.querySelectorAll('span'))
+                            .some(s => (s.textContent || '').trim() === 'Expand');
                     });
                 }
 
@@ -825,11 +855,11 @@ export class GoogleFxFlowTool extends BaseTool {
             });
 
             if (coords) {
-                console.log(`      🖱️ Clicking Expand button at [${coords.cx}, ${coords.cy}] (attempt ${attempt}/3)...`);
+                console.log(`      🖱️ Clicking Expand button at [${coords.cx}, ${coords.cy}] (attempt ${attempt}/4)...`);
                 try { await page.mouse.click(coords.cx, coords.cy); } catch {}
                 await page.waitForTimeout(1500);
 
-                // Verify the panel opened
+                // Verify the panel opened (right-side textbox appeared)
                 const panelVisible = await page.evaluate(() => {
                     const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
                     return Array.from(document.querySelectorAll('textarea, [role="textbox"], [contenteditable="true"]'))
@@ -844,9 +874,10 @@ export class GoogleFxFlowTool extends BaseTool {
                     console.log(`      ✅ Agent panel expanded successfully!`);
                     return;
                 }
+                console.warn(`      ⚠️ Panel not confirmed open after click (attempt ${attempt}/4)`);
             } else {
-                console.warn(`      ⚠️ Expand button not found/visible (attempt ${attempt}/3)`);
-                await page.waitForTimeout(800);
+                console.warn(`      ℹ️ Expand button not found (attempt ${attempt}/4) — panel may already be open`);
+                await page.waitForTimeout(600);
             }
         }
         console.warn(`      ⚠️ Could not confirm Expand panel opened — proceeding with flow`);
@@ -1291,12 +1322,13 @@ export class GoogleFxFlowTool extends BaseTool {
                 const allBtns = Array.from(document.querySelectorAll('button, [role="button"]'));
 
                 // Primary: find '+'/add_2/Create button in the right-side Agent panel
+                // Thresholds relaxed (0.4 / 0.6) for VPS headless Chromium where layout shifts
                 let addBtn = allBtns.find(b => {
                     if (!isVisible(b)) return false;
                     const r = b.getBoundingClientRect();
                     // Must be in RIGHT portion of screen (Agent panel) AND bottom area (panel bottom bar)
-                    if (r.left < window.innerWidth * 0.6) return false;
-                    if (r.top < window.innerHeight * 0.8) return false;
+                    if (r.left < window.innerWidth * 0.4) return false;
+                    if (r.top < window.innerHeight * 0.65) return false;
                     const txt = (b.innerText || b.textContent || '').trim();
                     return txt.includes('add_2') || txt === '+' || txt.includes('Create');
                 });
@@ -1306,8 +1338,8 @@ export class GoogleFxFlowTool extends BaseTool {
                     addBtn = allBtns.find(b => {
                         if (!isVisible(b)) return false;
                         const r = b.getBoundingClientRect();
-                        if (r.left < window.innerWidth * 0.6) return false;
-                        if (r.top < window.innerHeight * 0.7) return false;
+                        if (r.left < window.innerWidth * 0.4) return false;
+                        if (r.top < window.innerHeight * 0.55) return false;
                         const cls = (b.className || '');
                         return cls.includes('sc-e8425ea6-0') || (b.textContent || '').trim() === '+';
                     });
@@ -2098,112 +2130,46 @@ export class GoogleFxFlowTool extends BaseTool {
     }
 
     /**
-     * Opens media panel, navigates to Avatar section, selects the avatar card, clicks "Add to Prompt".
+     * Opens media panel, ensures the avatar card is selected, then clicks "Add to Prompt".
      *
-     * UI Flow (verified via browser DOM inspection on 2026-08-03):
-     * 1. Click the small "+" (add_2 Create) button at bottom-right of prompt bar → floating panel opens
-     * 2. Left sidebar of panel: All | Images | Videos | Voices | Characters | Avatar | Uploads
-     * 3. Click "Avatar" in sidebar → center shows [role="option"] cards e.g. "me / Avatar"
-     * 4. Click the avatar card → right panel shows preview + "Add to Prompt" button
-     * 5. Click "Add to Prompt" → avatar thumbnail appears in prompt bar (bottom-right)
+     * UI Flow (verified via browser DOM inspection on 2026-08-11):
+     * 1. Click the "+" (add_2 Create) button at bottom-right prompt bar → floating panel opens
+     * 2. Panel layout:
+     *    - Left sidebar tabs: All | Images | Videos | Voices | Characters | Avatar | Uploads (x: ~710-840)
+     *    - Center asset list with [role="option"] cards (x: ~840-1090)
+     *    - Right preview area + "Add to Prompt" button at bottom (x: ~1090-1480)
+     * 3. When panel opens, the last-used asset (avatar "me") is ALREADY SELECTED
+     *    → "Add to Prompt" button is immediately visible in the right preview area
+     * 4. DO NOT click the avatar card again — clicking it TOGGLES selection and may close panel
+     * 5. If avatar not pre-selected: click "Avatar" sidebar tab → card appears → "Add to Prompt" shows
+     * 6. Click "Add to Prompt" → avatar thumbnail appears in prompt bar
      */
     async _addAvatarToPrompt(page, avatarName = 'me') {
         console.log(`\n[Avatar] 👤 Adding Avatar "${avatarName}" to prompt...`);
 
-        // Step 1: Open the Media Drawer (the floating panel from the "+" prompt button)
+        // Step 1: Open the Media Drawer
         const panelOpened = await this._openMediaPanel(page);
         if (!panelOpened) {
             throw new Error('[GoogleFX] ❌ Could not open media drawer for Avatar selection.');
         }
         await page.waitForTimeout(1500);
 
-        // Step 2: The "me / Avatar" card is ALREADY visible in the "All" tab (default)
-        // when the drawer opens. From DOM inspection: [role="option"] with text "me\nAvatar"
-        // at approximately x:960, y:143 in the center panel (panel starts at x:700).
-        // We click it directly WITHOUT switching to "Avatar" tab.
-        console.log(`      🎯 Looking for avatar card "${avatarName}" in media panel...`);
+        // Step 2: Check if "Add to Prompt" button is ALREADY visible (avatar pre-selected on panel open)
+        // This is the common case — the last-used avatar is auto-selected.
+        // We try clicking it directly WITHOUT clicking the card (which would toggle/deselect).
+        console.log(`      🎯 Checking if "Add to Prompt" is already visible (pre-selected avatar)...`);
 
-        let cardFound = false;
-        for (let attempt = 1; attempt <= 5; attempt++) {
-            const cardCoords = await page.evaluate((targetName) => {
-                const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
-
-                // Strategy 1: [role="option"] with text matching targetName
-                let card = Array.from(document.querySelectorAll('[role="option"]')).find(el => {
-                    if (!isVisible(el)) return false;
-                    const r = el.getBoundingClientRect();
-                    if (r.left < 700) return false; // Only inside the floating panel (not app left sidebar)
-                    const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
-                    return txt.includes(targetName.toLowerCase());
-                });
-
-                // Strategy 2: any [role="option"] inside the floating panel area (x > 700)
-                if (!card) {
-                    card = Array.from(document.querySelectorAll('[role="option"]')).find(el => {
-                        if (!isVisible(el)) return false;
-                        const r = el.getBoundingClientRect();
-                        return r.left > 700 && r.top > 50;
-                    });
-                }
-
-                // Strategy 3: sc-b0e5 class (avatar card class from browser DOM inspection)
-                if (!card) {
-                    card = Array.from(document.querySelectorAll('[class*="sc-b0e5"]')).find(el => {
-                        if (!isVisible(el)) return false;
-                        const r = el.getBoundingClientRect();
-                        return r.left > 700 && r.top > 50;
-                    });
-                }
-
-                // Strategy 4: any img or figure in the floating panel center area
-                if (!card) {
-                    card = Array.from(document.querySelectorAll('img, figure')).find(el => {
-                        if (!isVisible(el)) return false;
-                        const r = el.getBoundingClientRect();
-                        return r.left > 700 && r.top > 50 && r.width > 30;
-                    });
-                }
-
-                if (card) {
-                    const r = card.getBoundingClientRect();
-                    return {
-                        cx: Math.round(r.left + r.width / 2),
-                        cy: Math.round(r.top + r.height / 2),
-                        text: (card.innerText || card.textContent || '').trim().substring(0, 40),
-                        tag: card.tagName,
-                        role: card.getAttribute('role') || '',
-                    };
-                }
-                return null;
-            }, avatarName);
-
-            if (cardCoords) {
-                console.log(`      🖱️ Clicking avatar card [${cardCoords.tag}/${cardCoords.role}] "${cardCoords.text}" at [${cardCoords.cx}, ${cardCoords.cy}]`);
-                try { await page.mouse.click(cardCoords.cx, cardCoords.cy); } catch {}
-                cardFound = true;
-                break;
-            }
-
-            console.warn(`      ⚠️ Avatar card not found in media panel (attempt ${attempt}/5)...`);
-            await page.waitForTimeout(800);
-        }
-
-        if (!cardFound) {
-            throw new Error(`[GoogleFX] ❌ Avatar card "${avatarName}" not found in media panel.`);
-        }
-        await page.waitForTimeout(1500);
-
-        // Step 3: Click "Add to Prompt" button
-        // From DOM: BUTTON text="Add to Prompt" at x~1284, y~625 in the right preview panel
-        console.log(`      ➕ Clicking "Add to Prompt" button...`);
         let addToPromptClicked = false;
-        for (let attempt = 1; attempt <= 5; attempt++) {
+
+        for (let attempt = 1; attempt <= 8; attempt++) {
             const addBtnCoords = await page.evaluate(() => {
                 const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+                // Find "Add to Prompt" button in the RIGHT preview panel area (x > 50% of viewport)
                 const btn = Array.from(document.querySelectorAll('button')).find(b => {
                     if (!isVisible(b)) return false;
                     const txt = (b.innerText || b.textContent || '').trim();
-                    return txt === 'Add to Prompt' || txt.toLowerCase() === 'add to prompt';
+                    // Use includes() not exact match — button may have icon chars appended
+                    return txt.includes('Add to Prompt') || txt.toLowerCase().includes('add to prompt');
                 });
                 if (btn) {
                     const r = btn.getBoundingClientRect();
@@ -2213,17 +2179,86 @@ export class GoogleFxFlowTool extends BaseTool {
             });
 
             if (addBtnCoords) {
-                console.log(`      🖱️ Clicking "Add to Prompt" at [${addBtnCoords.cx}, ${addBtnCoords.cy}]`);
+                console.log(`      ✅ "Add to Prompt" found at [${addBtnCoords.cx}, ${addBtnCoords.cy}] (attempt ${attempt}/8)`);
+                console.log(`      🖱️ Clicking "Add to Prompt"...`);
                 try { await page.mouse.click(addBtnCoords.cx, addBtnCoords.cy); } catch {}
                 addToPromptClicked = true;
                 break;
             }
-            console.warn(`      ⚠️ "Add to Prompt" button not visible yet (attempt ${attempt}/5)...`);
-            await page.waitForTimeout(800);
+
+            // If not found yet:
+            if (attempt === 1) {
+                // On first miss: click the "Avatar" sidebar tab to ensure avatar card is in view
+                console.log(`      ↩️ "Add to Prompt" not visible — clicking "Avatar" sidebar tab...`);
+                await page.evaluate(() => {
+                    const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+                    // Sidebar tab buttons: text "Avatar" (NOT the card), located in the LEFT sidebar (x < 55% of viewport)
+                    const avatarTab = Array.from(document.querySelectorAll('button, [role="tab"], [role="option"], li, [role="listitem"]')).find(el => {
+                        if (!isVisible(el)) return false;
+                        const r = el.getBoundingClientRect();
+                        // Must be in left sidebar zone (x < 57% viewport) to avoid clicking the card itself
+                        if (r.left > window.innerWidth * 0.57) return false;
+                        const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
+                        return txt === 'avatar';
+                    });
+                    if (avatarTab) avatarTab.click();
+                });
+                await page.waitForTimeout(1200);
+                continue;
+            }
+
+            if (attempt === 3) {
+                // On third miss: click the avatar CARD in the center panel to select it
+                // Only if the card is in the CENTER area (x: 57%-80% of viewport) to avoid clicking sidebar
+                console.log(`      📌 Clicking avatar card to select it...`);
+                const cardCoords = await page.evaluate((targetName) => {
+                    const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+                    // The avatar card is in the CENTER of the panel (x: 57%-80% of viewport)
+                    // Sidebar tabs end at ~57% viewport width; right preview starts at ~72%
+                    let card = Array.from(document.querySelectorAll('[role="option"]')).find(el => {
+                        if (!isVisible(el)) return false;
+                        const r = el.getBoundingClientRect();
+                        // Card must be in center panel zone (NOT sidebar, NOT right preview)
+                        if (r.left < window.innerWidth * 0.57) return false;
+                        if (r.left > window.innerWidth * 0.80) return false;
+                        const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
+                        return txt.includes(targetName.toLowerCase());
+                    });
+                    // Fallback: any [role="option"] in center zone
+                    if (!card) {
+                        card = Array.from(document.querySelectorAll('[role="option"]')).find(el => {
+                            if (!isVisible(el)) return false;
+                            const r = el.getBoundingClientRect();
+                            return r.left >= window.innerWidth * 0.57 && r.left <= window.innerWidth * 0.80 && r.top > 50;
+                        });
+                    }
+                    if (card) {
+                        const r = card.getBoundingClientRect();
+                        return {
+                            cx: Math.round(r.left + r.width / 2),
+                            cy: Math.round(r.top + r.height / 2),
+                            text: (card.innerText || card.textContent || '').trim().substring(0, 40),
+                        };
+                    }
+                    return null;
+                }, avatarName);
+
+                if (cardCoords) {
+                    console.log(`      🖱️ Clicking avatar card "${cardCoords.text}" at [${cardCoords.cx}, ${cardCoords.cy}]`);
+                    try { await page.mouse.click(cardCoords.cx, cardCoords.cy); } catch {}
+                    await page.waitForTimeout(1200);
+                } else {
+                    console.warn(`      ⚠️ Avatar card not found in center panel zone`);
+                }
+                continue;
+            }
+
+            console.warn(`      ⚠️ "Add to Prompt" button not visible yet (attempt ${attempt}/8)...`);
+            await page.waitForTimeout(700);
         }
 
         if (!addToPromptClicked) {
-            throw new Error(`[GoogleFX] ❌ Could not click "Add to Prompt" for Avatar "${avatarName}".`);
+            throw new Error(`[GoogleFX] ❌ Could not click "Add to Prompt" for Avatar "${avatarName}" after 8 attempts.`);
         }
 
         await page.waitForTimeout(2000);
@@ -2387,9 +2422,16 @@ export class GoogleFxFlowTool extends BaseTool {
                 const bodyText = (document.body && document.body.innerText) || '';
 
                 // 1. Percentage tracking (e.g., 15%, 50%, 99%)
+                // GUARD: Only capture pct from body text if a real active loader/spinner is present.
+                // Without this guard, static UI text like "100%" from CSS/layout
+                // causes a false 100% on the very first poll before generation starts.
+                const hasLoaderForPct = Array.from(document.querySelectorAll(
+                    '[role="progressbar"], progress, [class*="spinner"], svg[class*="loading"], [class*="loader"]'
+                )).some(el => el.offsetWidth > 0 && el.offsetHeight > 0);
+
                 const pctMatches = bodyText.match(/(\d{1,3})\s*%/g);
                 let currentPct = null;
-                if (pctMatches && pctMatches.length > 0) {
+                if (pctMatches && pctMatches.length > 0 && hasLoaderForPct) {
                     for (const match of pctMatches) {
                         const val = parseInt(match.replace('%', '').trim(), 10);
                         if (val >= 0 && val <= 100) {
@@ -2399,7 +2441,7 @@ export class GoogleFxFlowTool extends BaseTool {
                     }
                 }
 
-                // Check aria-valuenow attributes on progress elements as fallback
+                // Check aria-valuenow attributes on progress elements as fallback (always reliable)
                 if (currentPct === null) {
                     const progressEls = Array.from(document.querySelectorAll('[role="progressbar"], progress, [aria-valuenow]'));
                     for (const el of progressEls) {
@@ -2482,6 +2524,14 @@ export class GoogleFxFlowTool extends BaseTool {
                     }
                 });
 
+                // Detect Google's "Something went wrong" error UI
+                const isGoogleError = bodyText.includes('Something went wrong') ||
+                                      bodyText.includes('something went wrong') ||
+                                      (bodyText.includes('Try again') && bodyText.includes('What do you want to create'));
+                const hasTryAgainBtn = !!Array.from(document.querySelectorAll('button')).find(b =>
+                    b.offsetWidth > 0 && (b.innerText || b.textContent || '').trim().toLowerCase() === 'try again'
+                );
+
                 return {
                     currentPct,
                     statusText,
@@ -2492,8 +2542,38 @@ export class GoogleFxFlowTool extends BaseTool {
                     imageUrl: newImageUrl,
                     text: bodyText.substring(0, 3000),
                     isCancelled: bodyText.includes('Response was cancelled') || bodyText.includes('response was cancelled'),
+                    isGoogleError,
+                    hasTryAgainBtn,
                 };
             }, { targetType: type, excludedUrls: Array.from(excludedUrlSet) });
+            // ── GOOGLE ERROR CHECK: "Something went wrong. Try again." ──
+            if (liveState.isGoogleError) {
+                console.warn(`      ⚠️ "Something went wrong" detected in Google Flow UI!`);
+                retryCount = (retryCount || 0) + 1;
+                if (retryCount > 3) {
+                    throw new Error('[GoogleFX] ❌ "Something went wrong" error repeated 3 times — aborting.');
+                }
+                console.log(`      🔄 Google error retry ${retryCount}/3 — clicking "Try again" and re-submitting...`);
+                // Auto-click the "Try again" button if visible in the UI
+                if (liveState.hasTryAgainBtn) {
+                    await page.evaluate(() => {
+                        const btn = Array.from(document.querySelectorAll('button')).find(b =>
+                            b.offsetWidth > 0 && (b.innerText || b.textContent || '').trim().toLowerCase() === 'try again'
+                        );
+                        if (btn) btn.click();
+                    });
+                    console.log(`      🖱️ Clicked "Try again" button.`);
+                    await page.waitForTimeout(3000);
+                }
+                const retryPrompt = this._lastPrompt || '';
+                if (retryPrompt) {
+                    await this._submitPrompt(page, retryPrompt);
+                    await page.waitForTimeout(3000);
+                    lastActivityTime = Date.now();
+                    continue;
+                }
+            }
+
             // ── CANCELLATION CHECK: if Google cancelled the response, retry the prompt ──
             if (liveState.isCancelled) {
                 console.warn(`      ⚠️ "Response was cancelled." detected — retrying prompt submission...`);
@@ -2503,19 +2583,19 @@ export class GoogleFxFlowTool extends BaseTool {
                 }
                 console.log(`      🔄 Retry attempt ${retryCount}/3 — re-submitting prompt...`);
                 await page.waitForTimeout(2000);
-                // Re-submit the prompt (prompt variable is captured in closure via _extractResult args)
-                // We use the stored _lastPrompt set before calling _extractResult
                 const retryPrompt = this._lastPrompt || '';
                 if (retryPrompt) {
                     await this._submitPrompt(page, retryPrompt);
                     await page.waitForTimeout(3000);
-                    lastActivityTime = Date.now(); // reset stale timer
+                    lastActivityTime = Date.now();
                     continue;
                 }
             }
 
             // Log live percentage & status updates if present in DOM & reset activity timer
-            if (liveState.currentPct !== null && liveState.currentPct !== lastProgressPct) {
+            // Guard: skip false-positive 100% (currentPct=100 but no active spinner = UI artifact)
+            if (liveState.currentPct !== null && liveState.currentPct !== lastProgressPct
+                && !(liveState.currentPct === 100 && !liveState.hasActiveSpinner)) {
                 console.log(`      🎬 Live UI Generation Progress: ${liveState.currentPct}% ${liveState.statusText ? `(${liveState.statusText})` : ''} (${elapsedSec}s)`);
                 lastProgressPct = liveState.currentPct;
                 lastActivityTime = Date.now();
