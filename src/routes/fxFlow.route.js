@@ -5,8 +5,12 @@ import { v4 as uuidv4 } from 'uuid';
 import { getJobsCollection } from '../db.js';
 import { generationQueue } from '../queue/generationQueue.js';
 import { logger } from '../utils/logger.js';
+import { authenticateSuperAdmin } from '../middlewares/superAdminAuth.js';
 
 const router = Router();
+
+// Apply Super Admin authentication to all Google FX Flow generation and status endpoints
+router.use(authenticateSuperAdmin);
 
 const generateAvatarSchema = Joi.object({
     prompt: Joi.string().min(1).max(5000).required().messages({

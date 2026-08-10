@@ -25,6 +25,10 @@ export async function connectDB() {
         // Create index on itemId
         await dbInstance.collection('generation_jobs').createIndex({ itemId: 1 }, { unique: true });
 
+        // Create indexes on super_admins collection
+        await dbInstance.collection('super_admins').createIndex({ email: 1 }, { unique: true });
+        await dbInstance.collection('super_admins').createIndex({ username: 1 }, { unique: true });
+
         logger.info(`[DB] Connected to MongoDB native driver successfully.`);
         console.log(`✅ [DB] Connected to MongoDB (collection: generation_jobs) successfully.\n`);
         return dbInstance;

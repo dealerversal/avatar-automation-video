@@ -12,6 +12,7 @@ import { registry } from './mcp/registry.js';
 import { generationQueue } from './queue/generationQueue.js';
 import fxFlowRouter from './routes/fxFlow.route.js';
 import sessionRouter from './routes/session.route.js';
+import superAdminRouter from './routes/superAdmin.route.js';
 
 // ── Register MCP Tools ────────────────────────────────────────────────────────
 import { GoogleFxFlowTool } from './tools/googleFxFlow.js';
@@ -57,8 +58,13 @@ app.use('/api/', limiter);
 // ── Routes ────────────────────────────────────────────────────────────────────
 
 // Login & Session Manager UI Page
+app.get('/flow-login', (_req, res) => {
+    res.sendFile(path.join(process.cwd(), 'public', 'flow-login.html'));
+});
+
+// Redirect legacy /login and /setup-session to /flow-login
 app.get(['/login', '/setup-session'], (_req, res) => {
-    res.sendFile(path.join(process.cwd(), 'public', 'login.html'));
+    res.redirect('/flow-login');
 });
 
 // Health check
@@ -72,6 +78,7 @@ app.get('/health', (_req, res) => {
 });
 
 // Primary API routes
+app.use('/api/super-admin', superAdminRouter);
 app.use('/api/fx-flow', fxFlowRouter);
 app.use('/api/session', sessionRouter);
 
@@ -93,10 +100,10 @@ async function startServer() {
         await generationQueue.recoverPendingJobs();
         
         app.listen(config.port, () => {
-            logger.info(`🚀 Google FX Flow Automation Server running on http://localhost:${config.port}`);
+            logger.info(`🚀 Google Flow Automation Server running on http://localhost:${config.port}`);
             logger.info(`📋 Registered tools: ${registry.getToolNames().join(', ')}`);
             logger.info(`🩺 Health: http://localhost:${config.port}/health`);
-            logger.info(`🔑 Login Page: http://localhost:${config.port}/login`);
+            logger.info(`🔑 Login Page: http://localhost:${config.port}/flow-login`);
             logger.info(`📡 API Generate: POST http://localhost:${config.port}/api/fx-flow/generate`);
             logger.info(`📡 API Status:   GET  http://localhost:${config.port}/api/fx-flow/status/:itemId`);
         });

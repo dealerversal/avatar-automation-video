@@ -220,11 +220,18 @@ export class SessionManager {
             }
 
             const cookies = await context.cookies();
-            const hasGoogleCookies = cookies.some((c) => c.name.includes('SID') || c.name.includes('HSID') || c.name.includes('SSID'));
+            const hasGoogleCookies = cookies.some((c) =>
+                c.name.includes('SID') ||
+                c.name.includes('HSID') ||
+                c.name.includes('SSID') ||
+                c.name.includes('OSID') ||
+                c.name.includes('SAPISID') ||
+                c.name.includes('APISID')
+            );
 
             await context.close();
 
-            const authenticated = (hasPromptInput || hasGoogleCookies) && !currentUrl.includes('accounts.google.com');
+            const authenticated = hasGoogleCookies && !currentUrl.includes('accounts.google.com');
 
             return {
                 authenticated,
@@ -234,7 +241,7 @@ export class SessionManager {
                 cookieCount: cookies.length,
                 hasGoogleCookies,
                 message: authenticated
-                    ? 'Successfully authenticated with Google FX Flow!'
+                    ? 'Successfully authenticated with Google Flow!'
                     : 'Not authenticated with Google. Please upload your browser-profile.zip.',
             };
         } catch (error) {
@@ -389,7 +396,7 @@ export class SessionManager {
                 try {
                     const { exec } = await import('child_process');
                     logger.info('[SessionManager] Reloading PM2 process after browser profile upload...');
-                    exec('/usr/bin/pm2 restart video-gen.dealerversal.com || pm2 restart video-gen.dealerversal.com', (err) => {
+                    exec('pm2 restart video-gen.dealerversal.com || pm2 restart avatar-automation-video || pm2 restart all', (err) => {
                         if (err) logger.warn(`[SessionManager] PM2 reload note: ${err.message}`);
                     });
                 } catch (e) { }
@@ -412,14 +419,46 @@ export class SessionManager {
     }
 
     /**
-     * Clears the current persistent profile directory on VPS.
+     * Clears the current persistent profile directory on VPS and reloads PM2 process.
      */
     static async clearSession() {
         const profileDir = config.browser.profileDir;
+        logger.info(`[SessionManager] Clearing browser profile at: ${profileDir}`);
+
+        await closeSharedContext();
+
         if (existsSync(profileDir)) {
-            rmSync(profileDir, { recursive: true, force: true });
-            mkdirSync(profileDir, { recursive: true });
+            try {
+                rmSync(profileDir, { recursive: true, force: true });
+            } catch (e) {
+                logger.warn(`[SessionManager] Could not remove profileDir: ${e.message}`);
+            }
         }
-        return { success: true, message: 'Browser profile directory cleared successfully.' };
+        mkdirSync(profileDir, { recursive: true });
+
+        // Clean up any root cookies/storageState files if present
+        const rootCookies = path.join(process.cwd(), 'cookies.json');
+        if (existsSync(rootCookies)) {
+            try { rmSync(rootCookies, { force: true }); } catch (e) { }
+        }
+        const rootStorage = path.join(process.cwd(), 'storageState.json');
+        if (existsSync(rootStorage)) {
+            try { rmSync(rootStorage, { force: true }); } catch (e) { }
+        }
+
+        logger.info(`[SessionManager] Browser profile and sessions completely cleared on server.`);
+
+        // Trigger PM2 reload asynchronously after clearing profile
+        setTimeout(async () => {
+            try {
+                const { exec } = await import('child_process');
+                logger.info('[SessionManager] Reloading PM2 process after browser profile reset...');
+                exec('pm2 restart video-gen.dealerversal.com || pm2 restart avatar-automation-video || pm2 restart all', (err) => {
+                    if (err) logger.warn(`[SessionManager] PM2 reload note: ${err.message}`);
+                });
+            } catch (e) { }
+        }, 500);
+
+        return { success: true, message: 'Google browser profile successfully reset and server reloaded on VPS.' };
     }
 }

@@ -1,0 +1,709 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Google Flow — Session Manager</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Outfit', 'Inter', 'sans-serif'],
+                        mono: ['JetBrains Mono', 'monospace'],
+                    }
+                }
+            }
+        }
+    </script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+</head>
+<body class="bg-slate-50 text-slate-800 font-sans min-h-screen flex flex-col selection:bg-slate-200 relative pb-20 sm:pb-24">
+
+    <!-- Top Full-Width Navigation Header (Hidden on Login) -->
+    <header id="mainHeader" class="hidden bg-white border-b border-slate-200/80 px-4 sm:px-8 py-3.5 flex items-center justify-between sticky top-0 z-30">
+        <div class="flex items-center gap-3">
+            <div class="w-10 h-10 rounded-xl bg-slate-900 flex items-center justify-center text-white shrink-0">
+                <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+                </svg>
+            </div>
+            <div>
+                <h1 class="text-base font-bold text-slate-900 tracking-tight leading-tight">Google Flow Session Manager</h1>
+                <div class="flex items-center gap-1.5 mt-0.5">
+                    <span id="headerStatusDot" class="w-2 h-2 rounded-full bg-slate-300"></span>
+                    <p id="headerSubtitle" class="text-xs font-semibold text-slate-500">Checking status...</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Header Actions: Logout -->
+        <div id="headerActions" class="flex items-center gap-3 shrink-0">
+            <!-- Skeleton for Logout button during status check -->
+            <div id="logoutSkeleton" class="hidden h-8 w-24 bg-slate-200 rounded-xl animate-pulse"></div>
+
+            <button id="logoutHeaderBtn" onclick="handleLogout()" title="Sign out" class="hidden px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 hover:text-rose-600 font-semibold text-xs rounded-xl border border-slate-200 transition-colors flex items-center gap-1.5">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"></path>
+                </svg>
+                <span class="hidden sm:inline">Sign Out</span>
+            </button>
+        </div>
+    </header>
+
+    <!-- Main Responsive App Container -->
+    <main class="flex-1 w-full max-w-6xl mx-auto p-4 sm:p-6 lg:p-8 flex flex-col">
+
+        <!-- Initial App Centered Theme Spinner Loader (Shown while verifying session) -->
+        <div id="initialAppLoader" class="w-full max-w-md mx-auto my-auto flex flex-col items-center justify-center p-8 space-y-4">
+            <div class="relative flex items-center justify-center">
+                <svg class="w-10 h-10 text-slate-900 animate-spin" fill="none" viewBox="0 0 24 24">
+                    <circle class="opacity-20" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3"></circle>
+                    <path class="opacity-90" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+            </div>
+            <p class="text-xs font-semibold text-slate-600 tracking-tight">Verifying session...</p>
+        </div>
+
+        <!-- ══════════════════════════════════════════════════════════════════ -->
+        <!-- VIEW 1: LOGIN CARD (Hidden until token check fails) -->
+        <!-- ══════════════════════════════════════════════════════════════════ -->
+        <div id="superAdminLoginView" class="hidden w-full max-w-md mx-auto my-auto bg-white border border-slate-200/80 rounded-2xl p-6 sm:p-8 space-y-5">
+            <div class="flex items-center gap-3 border-b border-slate-100 pb-4">
+                <div class="w-10 h-10 rounded-xl bg-slate-900 flex items-center justify-center text-white shrink-0">
+                    <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+                    </svg>
+                </div>
+                <div>
+                    <h2 class="text-base font-bold text-slate-900 tracking-tight leading-tight">Login</h2>
+                    <p class="text-xs text-slate-500 font-medium">Google Flow Session Manager</p>
+                </div>
+            </div>
+
+            <!-- Login Error Alert -->
+            <div id="loginErrorAlert" class="hidden p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs font-medium flex items-center gap-2">
+                <svg class="w-4 h-4 text-rose-600 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                </svg>
+                <span id="loginErrorText">Invalid credentials</span>
+            </div>
+
+            <form id="superAdminLoginForm" onsubmit="handleSuperAdminLogin(event)" class="space-y-4">
+                <div>
+                    <label class="block text-xs font-semibold text-slate-700 mb-1.5 uppercase tracking-wider">Email Address</label>
+                    <input type="email" id="adminEmail" required placeholder="you@dealerversal.com"
+                        class="w-full bg-slate-50 border border-slate-200 focus:border-slate-900 rounded-xl px-4 py-3 text-sm font-medium text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-900/10 transition-all">
+                </div>
+
+                <div>
+                    <label class="block text-xs font-semibold text-slate-700 mb-1.5 uppercase tracking-wider">Password</label>
+                    <div class="relative">
+                        <input type="password" id="adminPassword" required placeholder="••••••••••••"
+                            class="w-full bg-slate-50 border border-slate-200 focus:border-slate-900 rounded-xl px-4 py-3 pr-10 text-sm font-medium text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-900/10 transition-all">
+                        <button type="button" onclick="togglePasswordVisibility()" class="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 transition-colors p-1.5">
+                            <svg id="eyeIcon" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path>
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"></path>
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+
+                <button type="submit" id="loginBtn" class="w-full mt-3 py-3.5 px-4 bg-slate-900 hover:bg-slate-800 active:scale-[0.99] text-white text-sm font-semibold rounded-xl transition-all flex items-center justify-center gap-2">
+                    <span id="loginBtnText">Sign In</span>
+                    <svg id="loginBtnSpinner" class="hidden w-4 h-4 text-white animate-spin" fill="none" viewBox="0 0 24 24">
+                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                </button>
+            </form>
+        </div>
+
+        <!-- ══════════════════════════════════════════════════════════════════ -->
+        <!-- VIEW 2: FULL-SCREEN GOOGLE FLOW SESSION MANAGER DASHBOARD -->
+        <!-- ══════════════════════════════════════════════════════════════════ -->
+        <div id="sessionManagerView" class="hidden w-full space-y-6">
+
+            <!-- SKELETON 2: DASHBOARD LOAD SKELETON (Shown while checking VPS session status) -->
+            <div id="skeletonLoader" class="w-full space-y-6 animate-pulse">
+                <div class="bg-white border border-slate-200/80 rounded-2xl p-6">
+                    <div class="flex items-center gap-4">
+                        <div class="w-14 h-14 bg-slate-200 rounded-2xl shrink-0"></div>
+                        <div class="space-y-2 flex-1">
+                            <div class="h-4 bg-slate-200 rounded w-48"></div>
+                            <div class="h-3 bg-slate-100 rounded w-32"></div>
+                            <div class="h-3 bg-slate-100 rounded w-56"></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="bg-white border border-slate-200/80 rounded-2xl p-6 space-y-3.5">
+                    <div class="flex items-center justify-between pb-3 border-b border-slate-100">
+                        <div class="h-3.5 bg-slate-200 rounded w-1/4"></div>
+                        <div class="h-3 bg-slate-100 rounded w-16"></div>
+                    </div>
+                    <div class="space-y-2 pt-1">
+                        <div class="h-9 bg-slate-50 border border-slate-100 rounded-xl w-full"></div>
+                        <div class="h-9 bg-slate-50 border border-slate-100 rounded-xl w-3/4"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- SECTION A: Connected Profile State -->
+            <div id="connectedState" class="hidden space-y-6">
+                <!-- Connected Profile Card -->
+                <div class="bg-white border border-slate-200/80 rounded-2xl p-6 sm:p-7">
+                    <div class="flex items-start sm:items-center gap-4">
+                        <div id="userAvatarContainer" class="w-14 h-14 rounded-2xl bg-emerald-100 border border-emerald-200 text-emerald-800 flex items-center justify-center shrink-0 overflow-hidden font-bold text-xl">
+                            <span id="userInitial"></span>
+                            <img id="userAvatarImg" class="hidden w-full h-full object-cover" src="" alt="Avatar">
+                        </div>
+                        <div class="space-y-1 min-w-0 flex-1">
+                            <div class="flex flex-wrap items-center gap-2.5">
+                                <h2 class="text-base font-bold text-slate-900 truncate" id="userName"></h2>
+                                <span class="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200 shrink-0">Active Session</span>
+                            </div>
+                            <p class="text-xs font-medium text-slate-600 truncate" id="userEmail"></p>
+                            <p class="text-xs text-slate-400 truncate" id="connectedDetails"></p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- SECTION B: Upload Profile Section -->
+            <div id="formSection" class="hidden space-y-4">
+                <div id="cancelFormContainer" class="flex items-center justify-between">
+                    <button id="cancelFormBtn" onclick="cancelForm()" class="hidden py-2 px-3.5 bg-white hover:bg-slate-50 text-slate-700 font-semibold text-xs rounded-xl border border-slate-200 transition-colors inline-flex items-center gap-1.5">
+                        <svg class="w-3.5 h-3.5 text-slate-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path>
+                        </svg>
+                        <span>Back to Connected Profile</span>
+                    </button>
+                </div>
+
+                <div class="bg-white border border-slate-200/80 rounded-2xl p-6 sm:p-8 space-y-4">
+                    <div class="flex items-center justify-between">
+                        <div>
+                            <h2 class="text-sm font-bold text-slate-900 tracking-tight">Upload VPS Browser Profile</h2>
+                            <p class="text-xs text-slate-500 font-medium mt-0.5">Upload a zipped Playwright profile archive (`browser-profile.zip`) to sync cookies</p>
+                        </div>
+                    </div>
+
+                    <!-- Drop Zone -->
+                    <label id="uploadDropZone" for="zipFileInput" class="group border-2 border-dashed border-slate-200 hover:border-slate-400 bg-slate-50/70 hover:bg-slate-100/70 rounded-2xl p-10 text-center cursor-pointer transition-all flex flex-col items-center justify-center">
+                        <div class="w-16 h-16 rounded-2xl bg-white border border-slate-200 group-hover:border-slate-300 flex items-center justify-center text-slate-500 group-hover:text-slate-900 transition-all mb-3">
+                            <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"></path>
+                            </svg>
+                        </div>
+                        <span id="uploadStatusText" class="text-sm font-semibold text-slate-700 group-hover:text-slate-900 transition-colors">Click or drag browser-profile.zip to upload</span>
+                        <p class="text-xs text-slate-400 font-medium mt-1">Supports Playwright / Chrome profiles containing Google auth cookies</p>
+                        <input type="file" id="zipFileInput" accept=".zip" onchange="autoUploadFile()" class="hidden">
+                    </label>
+
+                    <!-- Progress Bar Container -->
+                    <div id="uploadProgressContainer" class="hidden border border-slate-200 bg-slate-50/80 rounded-2xl p-6 space-y-4">
+                        <div class="flex items-center justify-between">
+                            <div class="flex items-center gap-3 min-w-0">
+                                <svg class="w-6 h-6 text-blue-600 animate-spin shrink-0" fill="none" viewBox="0 0 24 24">
+                                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                </svg>
+                                <span id="uploadProgressFileName" class="text-sm font-bold text-slate-900 truncate">Uploading profile...</span>
+                            </div>
+                            <span id="uploadProgressPercent" class="text-sm font-mono font-bold text-blue-600 shrink-0">0%</span>
+                        </div>
+
+                        <div class="w-full bg-slate-200 rounded-full h-2.5 overflow-hidden">
+                            <div id="uploadProgressBar" class="bg-blue-600 h-2.5 rounded-full transition-all duration-150 ease-out" style="width: 0%"></div>
+                        </div>
+
+                        <p id="uploadProgressSubtext" class="text-xs text-slate-500 font-medium text-center truncate">Uploading payload to VPS...</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Live Logs Console Section (Light Mode) -->
+            <div id="logConsoleCard" class="hidden bg-white border border-slate-200/80 rounded-2xl p-5 space-y-3">
+                <div class="flex items-center justify-between border-b border-slate-100 pb-3">
+                    <span class="text-xs font-mono font-bold text-slate-600 uppercase tracking-wider flex items-center gap-2">
+                        <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                        <span>System Activity Console</span>
+                    </span>
+                    <button onclick="document.getElementById('logBox').innerHTML=''" class="text-[11px] font-semibold text-slate-400 hover:text-slate-700 transition-colors">Clear logs</button>
+                </div>
+                <div id="logBox" class="font-mono text-xs max-h-48 overflow-y-auto space-y-2 pr-1"></div>
+            </div>
+
+        </div>
+
+    </main>
+
+    <!-- ══════════════════════════════════════════════════════════════════ -->
+    <!-- FLOATING BOTTOM ACTION FOOTER BAR (Hidden by default) -->
+    <!-- ══════════════════════════════════════════════════════════════════ -->
+    <div id="floatingFooter" class="hidden fixed bottom-4 left-1/2 -translate-x-1/2 z-40 w-[calc(100%-2rem)] max-w-xl bg-white/95 backdrop-blur-md border border-slate-200/90 rounded-2xl p-2 sm:p-2.5 transition-all flex items-center justify-between gap-2 sm:gap-3">
+        <button onclick="toggleForm()" class="flex-1 py-2.5 px-3 bg-slate-900 hover:bg-slate-800 active:scale-[0.99] text-white font-semibold text-xs rounded-xl transition-all flex items-center justify-center gap-2 whitespace-nowrap">
+            <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path>
+            </svg>
+            <span>Upload Profile</span>
+        </button>
+        <button onclick="checkStatus()" class="flex-1 py-2.5 px-3 bg-white hover:bg-slate-50 active:scale-[0.99] text-slate-700 font-semibold text-xs rounded-xl border border-slate-200 transition-all flex items-center justify-center gap-2 whitespace-nowrap">
+            <svg class="w-4 h-4 text-slate-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+            </svg>
+            <span>Re-verify</span>
+        </button>
+        <button onclick="clearProfile()" class="flex-1 py-2.5 px-3 bg-white hover:bg-rose-50 active:scale-[0.99] text-slate-700 hover:text-rose-700 font-semibold text-xs rounded-xl border border-slate-200 hover:border-rose-200 transition-all flex items-center justify-center gap-2 whitespace-nowrap">
+            <svg class="w-4 h-4 text-slate-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
+            </svg>
+            <span>Reset</span>
+        </button>
+    </div>
+
+    <!-- Scripts -->
+    <script>
+        let isAuthenticatedSession = false;
+
+        // Utility: Get Cookie
+        function getCookie(name) {
+            const value = `; ${document.cookie}`;
+            const parts = value.split(`; ${name}=`);
+            if (parts.length === 2) return parts.pop().split(';').shift();
+            return null;
+        }
+
+        // Utility: Set Cookie
+        function setCookie(name, value, days = 15) {
+            const d = new Date();
+            d.setTime(d.getTime() + (days * 24 * 60 * 60 * 1000));
+            document.cookie = `${name}=${value};expires=${d.toUTCString()};path=/;SameSite=Lax`;
+        }
+
+        // Utility: Delete Cookie
+        function deleteCookie(name) {
+            document.cookie = `${name}=;expires=Thu, 01 Jan 1970 00:00:00 UTC;path=/;`;
+        }
+
+        function getAuthToken() {
+            return getCookie('superAdminToken') || localStorage.getItem('superAdminToken');
+        }
+
+        function togglePasswordVisibility() {
+            const pwd = document.getElementById('adminPassword');
+            pwd.type = pwd.type === 'password' ? 'text' : 'password';
+        }
+
+        // Handle Super Admin Email & Password Login
+        async function handleSuperAdminLogin(e) {
+            e.preventDefault();
+            const email = document.getElementById('adminEmail').value;
+            const password = document.getElementById('adminPassword').value;
+            const btnText = document.getElementById('loginBtnText');
+            const spinner = document.getElementById('loginBtnSpinner');
+            const errAlert = document.getElementById('loginErrorAlert');
+            const errText = document.getElementById('loginErrorText');
+
+            btnText.innerText = 'Verifying...';
+            spinner.classList.remove('hidden');
+            errAlert.classList.add('hidden');
+
+            try {
+                const res = await fetch('/api/super-admin/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ email, password }),
+                });
+
+                const data = await res.json();
+                spinner.classList.add('hidden');
+                btnText.innerText = 'Sign In';
+
+                if (data.success && data.token) {
+                    setCookie('superAdminToken', data.token, 15);
+                    localStorage.setItem('superAdminToken', data.token);
+                    showSessionManagerView();
+                } else {
+                    errText.innerText = data.error || 'Invalid super admin credentials';
+                    errAlert.classList.remove('hidden');
+                }
+            } catch (err) {
+                spinner.classList.add('hidden');
+                btnText.innerText = 'Sign In';
+                errText.innerText = `Network error: ${err.message}`;
+                errAlert.classList.remove('hidden');
+            }
+        }
+
+        // Verify Super Admin token on init
+        async function initAuth() {
+            const token = getAuthToken();
+            if (!token) {
+                showLoginView();
+                return;
+            }
+
+            try {
+                const res = await fetch('/api/super-admin/me', {
+                    headers: { 'Authorization': `Bearer ${token}` },
+                });
+                const data = await res.json();
+                if (data.success) {
+                    showSessionManagerView();
+                } else {
+                    handleLogout(true);
+                }
+            } catch (err) {
+                showLoginView();
+            }
+        }
+
+        function showLoginView() {
+            document.getElementById('initialAppLoader').classList.add('hidden');
+            document.getElementById('superAdminLoginView').classList.remove('hidden');
+            document.getElementById('sessionManagerView').classList.add('hidden');
+            document.getElementById('mainHeader').classList.add('hidden');
+            document.getElementById('logoutHeaderBtn').classList.add('hidden');
+            document.getElementById('logoutSkeleton').classList.add('hidden');
+            document.getElementById('floatingFooter').classList.add('hidden');
+        }
+
+        function showSessionManagerView() {
+            document.getElementById('initialAppLoader').classList.add('hidden');
+            document.getElementById('superAdminLoginView').classList.add('hidden');
+            document.getElementById('sessionManagerView').classList.remove('hidden');
+            document.getElementById('mainHeader').classList.remove('hidden');
+            document.getElementById('logoutSkeleton').classList.remove('hidden');
+            document.getElementById('logoutHeaderBtn').classList.add('hidden');
+            checkStatus();
+        }
+
+        function handleLogout(skipConfirm = false) {
+            if (!skipConfirm && !confirm('Are you sure you want to sign out as Super Admin?')) {
+                return;
+            }
+            deleteCookie('superAdminToken');
+            localStorage.removeItem('superAdminToken');
+            showLoginView();
+        }
+
+        function showLog(msg, type = 'info') {
+            const consoleCard = document.getElementById('logConsoleCard');
+            const box = document.getElementById('logBox');
+            consoleCard.classList.remove('hidden');
+            box.classList.remove('hidden');
+
+            let styleClass = 'bg-slate-50 border-slate-200/80 text-slate-700';
+            if (type === 'error') {
+                styleClass = 'bg-rose-50 border-rose-200 text-rose-700 font-semibold';
+            } else if (type === 'success') {
+                styleClass = 'bg-emerald-50/80 border-emerald-200 text-emerald-800 font-semibold';
+            }
+
+            box.innerHTML += `<div class="p-2.5 rounded-xl border text-xs font-medium ${styleClass} flex items-start gap-2.5"><span class="text-slate-400 shrink-0 font-mono text-[11px]">[${new Date().toLocaleTimeString()}]</span> <span class="break-all">${msg}</span></div>`;
+            box.scrollTop = box.scrollHeight;
+        }
+
+        function toggleForm() {
+            const form = document.getElementById('formSection');
+            const connectedState = document.getElementById('connectedState');
+            const cancelBtn = document.getElementById('cancelFormBtn');
+            const footer = document.getElementById('floatingFooter');
+
+            form.classList.remove('hidden');
+            connectedState.classList.add('hidden');
+            footer.classList.add('hidden');
+            if (isAuthenticatedSession) {
+                cancelBtn.classList.remove('hidden');
+            }
+        }
+
+        function cancelForm() {
+            if (isAuthenticatedSession) {
+                document.getElementById('formSection').classList.add('hidden');
+                document.getElementById('connectedState').classList.remove('hidden');
+                document.getElementById('floatingFooter').classList.remove('hidden');
+            }
+        }
+
+        async function checkStatus() {
+            const loader = document.getElementById('skeletonLoader');
+            const connectedState = document.getElementById('connectedState');
+            const formSection = document.getElementById('formSection');
+            const headerDot = document.getElementById('headerStatusDot');
+            const headerSubtitle = document.getElementById('headerSubtitle');
+            const footer = document.getElementById('floatingFooter');
+            const logoutSkeleton = document.getElementById('logoutSkeleton');
+            const logoutBtn = document.getElementById('logoutHeaderBtn');
+
+            loader.classList.remove('hidden');
+            connectedState.classList.add('hidden');
+            formSection.classList.add('hidden');
+            footer.classList.add('hidden');
+            logoutBtn.classList.add('hidden');
+            logoutSkeleton.classList.remove('hidden');
+
+            headerDot.className = 'w-2 h-2 rounded-full bg-slate-300 animate-pulse';
+            headerSubtitle.className = 'text-xs font-semibold text-slate-500';
+            headerSubtitle.innerText = 'Checking status...';
+
+            const token = getAuthToken();
+
+            try {
+                const res = await fetch('/api/session/status', {
+                    headers: { 'Authorization': `Bearer ${token}` },
+                });
+
+                if (res.status === 401 || res.status === 403) {
+                    handleLogout(true);
+                    return;
+                }
+
+                const data = await res.json();
+
+                loader.classList.add('hidden');
+
+                if (data.authenticated) {
+                    isAuthenticatedSession = true;
+                    headerDot.className = 'w-2 h-2 rounded-full bg-emerald-500';
+                    headerSubtitle.className = 'text-xs font-semibold text-emerald-700';
+                    headerSubtitle.innerText = 'Connected & Authenticated';
+
+                    // Reveal Logout button only after Connected & Authenticated is shown
+                    logoutSkeleton.classList.add('hidden');
+                    logoutBtn.classList.remove('hidden');
+
+                    if (data.user) {
+                        document.getElementById('userName').innerText = data.user.name || 'Google Account Connected';
+                        document.getElementById('userEmail').innerText = data.user.email ? data.user.email : '';
+                        if (data.user.avatar) {
+                            document.getElementById('userAvatarImg').src = data.user.avatar;
+                            document.getElementById('userAvatarImg').classList.remove('hidden');
+                            document.getElementById('userInitial').classList.add('hidden');
+                        } else {
+                            document.getElementById('userInitial').innerText = (data.user.name || 'G').charAt(0).toUpperCase();
+                            document.getElementById('userAvatarImg').classList.add('hidden');
+                            document.getElementById('userInitial').classList.remove('hidden');
+                        }
+                    } else {
+                        document.getElementById('userName').innerText = 'Google Account Connected';
+                        document.getElementById('userEmail').innerText = '';
+                        document.getElementById('userInitial').innerText = '✓';
+                        document.getElementById('userAvatarImg').classList.add('hidden');
+                        document.getElementById('userInitial').classList.remove('hidden');
+                    }
+
+                    document.getElementById('connectedDetails').innerText = `Google Flow session active (${data.cookieCount} cookies stored).`;
+                    connectedState.classList.remove('hidden');
+                    formSection.classList.add('hidden');
+                    footer.classList.remove('hidden');
+                    showLog(`✅ Session Active: Authenticated with Google Flow! (${data.cookieCount} cookies stored)`, 'success');
+                } else {
+                    isAuthenticatedSession = false;
+                    headerDot.className = 'w-2 h-2 rounded-full bg-rose-500';
+                    headerSubtitle.className = 'text-xs font-semibold text-rose-600';
+                    headerSubtitle.innerText = 'Not Authenticated';
+
+                    logoutSkeleton.classList.add('hidden');
+                    logoutBtn.classList.remove('hidden');
+
+                    // Reset profile info DOM elements
+                    document.getElementById('userName').innerText = '';
+                    document.getElementById('userEmail').innerText = '';
+                    document.getElementById('connectedDetails').innerText = '';
+                    document.getElementById('userAvatarImg').classList.add('hidden');
+                    document.getElementById('userAvatarImg').src = '';
+                    document.getElementById('userInitial').innerText = '';
+                    document.getElementById('cancelFormBtn').classList.add('hidden');
+
+                    connectedState.classList.add('hidden');
+                    formSection.classList.remove('hidden');
+                    footer.classList.add('hidden');
+
+                    // Hide log console on upload view
+                    document.getElementById('logConsoleCard').classList.add('hidden');
+                }
+            } catch (err) {
+                loader.classList.add('hidden');
+                isAuthenticatedSession = false;
+
+                headerDot.className = 'w-2 h-2 rounded-full bg-rose-500';
+                headerSubtitle.className = 'text-xs font-semibold text-rose-600';
+                headerSubtitle.innerText = 'Connection Error';
+
+                logoutSkeleton.classList.add('hidden');
+                logoutBtn.classList.remove('hidden');
+
+                // Reset profile info DOM elements
+                document.getElementById('userName').innerText = '';
+                document.getElementById('userEmail').innerText = '';
+                document.getElementById('connectedDetails').innerText = '';
+                document.getElementById('userAvatarImg').classList.add('hidden');
+                document.getElementById('userAvatarImg').src = '';
+                document.getElementById('userInitial').innerText = '';
+                document.getElementById('cancelFormBtn').classList.add('hidden');
+
+                connectedState.classList.add('hidden');
+                formSection.classList.remove('hidden');
+                footer.classList.add('hidden');
+
+                // Hide log console on connection error
+                document.getElementById('logConsoleCard').classList.add('hidden');
+            }
+        }
+
+        function autoUploadFile() {
+            const fileInput = document.getElementById('zipFileInput');
+            if (!fileInput.files || fileInput.files.length === 0) return;
+
+            const file = fileInput.files[0];
+            const dropZone = document.getElementById('uploadDropZone');
+            const progressContainer = document.getElementById('uploadProgressContainer');
+            const fileNameElem = document.getElementById('uploadProgressFileName');
+            const percentElem = document.getElementById('uploadProgressPercent');
+            const progressBar = document.getElementById('uploadProgressBar');
+            const subtextElem = document.getElementById('uploadProgressSubtext');
+            const footer = document.getElementById('floatingFooter');
+
+            dropZone.classList.add('hidden');
+            progressContainer.classList.remove('hidden');
+            footer.classList.add('hidden');
+            fileNameElem.innerText = `Uploading ${file.name}`;
+            percentElem.innerText = '0%';
+            progressBar.style.width = '0%';
+            subtextElem.innerText = `Uploading ${(file.size / (1024 * 1024)).toFixed(1)} MB zip payload to VPS...`;
+
+            showLog(`🚀 Uploading ${file.name} (${(file.size / (1024 * 1024)).toFixed(2)} MB) to VPS...`);
+
+            const token = getAuthToken();
+            const xhr = new XMLHttpRequest();
+            xhr.open('POST', '/api/session/upload-zip', true);
+            xhr.setRequestHeader('Content-Type', 'application/zip');
+            if (token) {
+                xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+            }
+
+            xhr.upload.onprogress = function (e) {
+                if (e.lengthComputable) {
+                    const percent = Math.round((e.loaded / e.total) * 100);
+                    progressBar.style.width = percent + '%';
+                    percentElem.innerText = percent + '%';
+
+                    if (percent >= 100) {
+                        subtextElem.innerText = 'Extracting zip & verifying Google session on VPS...';
+                    } else {
+                        const loadedMb = (e.loaded / (1024 * 1024)).toFixed(1);
+                        const totalMb = (e.total / (1024 * 1024)).toFixed(1);
+                        subtextElem.innerText = `Uploaded ${loadedMb} MB / ${totalMb} MB (${percent}%)`;
+                    }
+                }
+            };
+
+            xhr.onload = async function () {
+                dropZone.classList.remove('hidden');
+                progressContainer.classList.add('hidden');
+                fileInput.value = '';
+
+                if (xhr.status === 401 || xhr.status === 403) {
+                    handleLogout(true);
+                    return;
+                }
+
+                if (xhr.status >= 200 && xhr.status < 300) {
+                    try {
+                        const data = JSON.parse(xhr.responseText);
+                        if (data.success) {
+                            showLog(`✅ ${data.message}`, 'success');
+                            await checkStatus();
+                        } else {
+                            showLog(`❌ Failed to save session: ${data.error}`, 'error');
+                        }
+                    } catch (e) {
+                        showLog(`❌ Response parse error: ${e.message}`, 'error');
+                    }
+                } else {
+                    showLog(`❌ HTTP Error ${xhr.status}: ${xhr.statusText || 'Upload Failed'}`, 'error');
+                }
+            };
+
+            xhr.onerror = function () {
+                dropZone.classList.remove('hidden');
+                progressContainer.classList.add('hidden');
+                fileInput.value = '';
+                showLog('❌ Network error during file upload.', 'error');
+            };
+
+            xhr.send(file);
+        }
+
+        async function clearProfile() {
+            if (!confirm('Are you sure you want to clear the browser profile on VPS?')) return;
+            const token = getAuthToken();
+            try {
+                const res = await fetch('/api/session/clear', {
+                    method: 'POST',
+                    headers: { 'Authorization': `Bearer ${token}` },
+                });
+                if (res.status === 401 || res.status === 403) {
+                    handleLogout(true);
+                    return;
+                }
+                const data = await res.json();
+
+                // 1. Google Profile session state reset (Super Admin remains authenticated)
+                isAuthenticatedSession = false;
+
+                // 2. Update Header status to Not Authenticated
+                const headerDot = document.getElementById('headerStatusDot');
+                const headerSubtitle = document.getElementById('headerSubtitle');
+                headerDot.className = 'w-2 h-2 rounded-full bg-rose-500';
+                headerSubtitle.className = 'text-xs font-semibold text-rose-600';
+                headerSubtitle.innerText = 'Not Authenticated';
+
+                // 3. Keep Logout Header Button visible (Super Admin stays logged in)
+                document.getElementById('logoutSkeleton').classList.add('hidden');
+                document.getElementById('logoutHeaderBtn').classList.remove('hidden');
+
+                // 4. Purge Profile Card info
+                document.getElementById('userName').innerText = '';
+                document.getElementById('userEmail').innerText = '';
+                document.getElementById('connectedDetails').innerText = '';
+                document.getElementById('userAvatarImg').classList.add('hidden');
+                document.getElementById('userAvatarImg').src = '';
+                document.getElementById('userInitial').innerText = '';
+                document.getElementById('connectedState').classList.add('hidden');
+
+                // 5. Reset Upload Form & File Progress
+                document.getElementById('cancelFormBtn').classList.add('hidden');
+                document.getElementById('zipFileInput').value = '';
+                document.getElementById('uploadDropZone').classList.remove('hidden');
+                document.getElementById('uploadProgressContainer').classList.add('hidden');
+                document.getElementById('uploadProgressBar').style.width = '0%';
+                document.getElementById('uploadProgressPercent').innerText = '0%';
+                document.getElementById('uploadProgressFileName').innerText = '';
+                document.getElementById('uploadProgressSubtext').innerText = '';
+                document.getElementById('formSection').classList.remove('hidden');
+
+                // 6. Reset Floating Footer until new profile upload
+                document.getElementById('floatingFooter').classList.add('hidden');
+
+                // 7. Clear & Hide System Activity Console Logs completely on Upload View
+                document.getElementById('logBox').innerHTML = '';
+                document.getElementById('logConsoleCard').classList.add('hidden');
+            } catch (err) {
+                // Keep console hidden even on error
+                document.getElementById('logConsoleCard').classList.add('hidden');
+            }
+        }
+
+        // Initialize view & check session on load
+        window.addEventListener('DOMContentLoaded', initAuth);
+    </script>
+</body>
+</html>
