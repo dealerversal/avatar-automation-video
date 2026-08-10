@@ -1,7 +1,7 @@
 module.exports = {
     apps: [
         {
-            name: 'gen.socialversal.online',
+            name: 'video-gen.dealerversal.com',
             script: 'src/server.js',
             cwd: '/root/projects/avatar-automation-video',
             instances: 1,

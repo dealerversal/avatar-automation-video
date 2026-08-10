@@ -14,10 +14,10 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     env:
-      HOST: 72.60.118.141
+      HOST: 2.24.75.236
       USER: root
       PROJECT_PATH: /root/projects/avatar-automation-video
-      PROCESS_NAME: gen.socialversal.online
+      PROCESS_NAME: video-gen.dealerversal.com
 
     steps:
       - name: Set up SSH keys

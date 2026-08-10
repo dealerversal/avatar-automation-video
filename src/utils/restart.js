@@ -11,7 +11,7 @@ import { logger } from './logger.js';
  * @param {number} delayMs Delay in milliseconds before triggering restart (default: 3000)
  */
 export function triggerServerRestart(delayMs = 3000) {
-    const appName = process.env.PM2_APP_NAME || 'gen.socialversal.online';
+    const appName = process.env.PM2_APP_NAME || 'video-gen.dealerversal.com';
 
     logger.info(`[Restart] Project completed & browser closed. Scheduling server restart in ${delayMs / 1000}s (PM2 App: "${appName}")...`);
     console.log(`\n🔄 [Server Restart] Scheduled in ${delayMs / 1000} seconds...`);

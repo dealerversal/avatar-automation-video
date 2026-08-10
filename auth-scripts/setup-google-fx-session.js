@@ -21,7 +21,7 @@ if (fs.existsSync(profileDir)) {
         if (fs.existsSync(lockPath)) {
             try {
                 fs.rmSync(lockPath, { force: true });
-            } catch (e) {}
+            } catch (e) { }
         }
     }
 } else {
@@ -32,7 +32,7 @@ console.log('🌐 Opening browser in stealth mode to bypass Google bot security 
 
 async function runSetup() {
     let context;
-    
+
     // Launch Chrome with --enable-automation ignored & stealth overrides
     try {
         console.log('💡 Launching Google Chrome (Stealth mode)...');
@@ -74,7 +74,7 @@ async function runSetup() {
 
     const page = context.pages().length > 0 ? context.pages()[0] : await context.newPage();
     console.log('🔗 Navigating to https://labs.google/fx/tools/flow...');
-    await page.goto('https://labs.google/fx/tools/flow', { waitUntil: 'domcontentloaded' }).catch(() => {});
+    await page.goto('https://labs.google/fx/tools/flow', { waitUntil: 'domcontentloaded' }).catch(() => { });
 
     console.log('\n------------------------------------------------------------------');
     console.log('🔑 STEP 1: LOG IN TO YOUR GOOGLE ACCOUNT IN THE OPENED BROWSER.');
@@ -125,14 +125,14 @@ async function runSetup() {
             }
         }
         console.log('🧹 Optimized browser profile (purged media caches while preserving auth tokens).');
-    } catch (e) {}
+    } catch (e) { }
 
     // Automatically create browser-profile.zip
     const projectRoot = path.resolve(__dirname, '..');
     const zipPath = path.join(projectRoot, 'browser-profile.zip');
-    
+
     if (fs.existsSync(zipPath)) {
-        try { fs.rmSync(zipPath, { force: true }); } catch (e) {}
+        try { fs.rmSync(zipPath, { force: true }); } catch (e) { }
     }
 
     console.log('\n📦 Automatically creating "browser-profile.zip"...');
@@ -150,7 +150,7 @@ async function runSetup() {
     console.log('✅ GOOGLE FX FLOW SESSION SAVED & ZIPPED AUTOMATICALLY!');
     console.log('======================================================');
     console.log(`1. "browser-profile.zip" is created in project root.`);
-    console.log('2. Open https://gen.socialversal.online/login');
+    console.log('2. Open https://video-gen.dealerversal.com/login');
     console.log('3. Select "browser-profile.zip" to upload & sync with VPS!');
     console.log('======================================================\n');
 

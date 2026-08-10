@@ -238,7 +238,7 @@ export class SessionManager {
                     : 'Not authenticated with Google. Please upload your browser-profile.zip.',
             };
         } catch (error) {
-            if (context) await context.close().catch(() => {});
+            if (context) await context.close().catch(() => { });
             logger.error('[SessionManager] Error checking status:', error);
             return {
                 authenticated: false,
@@ -329,7 +329,7 @@ export class SessionManager {
                 message: 'Google session successfully authenticated and saved into VPS profile!',
             };
         } catch (error) {
-            if (context) await context.close().catch(() => {});
+            if (context) await context.close().catch(() => { });
             logger.error('[SessionManager] Failed to import session:', error);
             throw new Error(`Failed to save session profile: ${error.message}`);
         }
@@ -389,10 +389,10 @@ export class SessionManager {
                 try {
                     const { exec } = await import('child_process');
                     logger.info('[SessionManager] Reloading PM2 process after browser profile upload...');
-                    exec('/usr/bin/pm2 restart gen.socialversal.online || pm2 restart gen.socialversal.online', (err) => {
+                    exec('/usr/bin/pm2 restart video-gen.dealerversal.com || pm2 restart video-gen.dealerversal.com', (err) => {
                         if (err) logger.warn(`[SessionManager] PM2 reload note: ${err.message}`);
                     });
-                } catch (e) {}
+                } catch (e) { }
             }, 500);
 
             return {
@@ -404,7 +404,7 @@ export class SessionManager {
             };
         } catch (error) {
             if (existsSync(tempZipPath)) {
-                try { unlinkSync(tempZipPath); } catch (e) {}
+                try { unlinkSync(tempZipPath); } catch (e) { }
             }
             logger.error('[SessionManager] Failed to extract uploaded profile zip:', error);
             throw new Error(`Failed to extract uploaded profile zip: ${error.message}`);
