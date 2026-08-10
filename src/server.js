@@ -30,8 +30,9 @@ app.use(cors());
 app.use('/downloads', express.static(path.join(process.cwd(), 'downloads')));
 app.use(express.static(path.join(process.cwd(), 'public')));
 
-// Middleware: JSON body parser
-app.use(express.json({ limit: '2mb' }));
+// Middleware: JSON & URL-encoded body parsers (500mb payload limit)
+app.use(express.json({ limit: '500mb' }));
+app.use(express.urlencoded({ limit: '500mb', extended: true }));
 
 // Middleware: Request ID
 app.use((req, _res, next) => {

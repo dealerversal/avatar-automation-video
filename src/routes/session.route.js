@@ -31,7 +31,7 @@ router.post('/import', async (req, res) => {
 });
 
 // POST /api/session/upload-zip
-router.post('/upload-zip', express.raw({ type: 'application/zip', limit: '100mb' }), async (req, res) => {
+router.post('/upload-zip', express.raw({ type: ['application/zip', 'application/x-zip-compressed', 'multipart/form-data', 'application/octet-stream', '*/*'], limit: '500mb' }), async (req, res) => {
     try {
         if (!req.body || req.body.length === 0) {
             return res.status(400).json({ success: false, error: 'No zip file data received' });
