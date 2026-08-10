@@ -2424,11 +2424,9 @@ export class GoogleFxFlowTool extends BaseTool {
                 const bodyText = (document.body && document.body.innerText) || '';
 
                 // 1. Percentage tracking (e.g., 15%, 50%, 99%)
-                // GUARD: Only capture pct from body text if a real active loader/spinner is present.
-                // Without this guard, static UI text like "100%" from CSS/layout
-                // causes a false 100% on the very first poll before generation starts.
+                // Expand selector list for modern Google Flow SVG / canvas / progressbar spinners
                 const hasLoaderForPct = Array.from(document.querySelectorAll(
-                    '[role="progressbar"], progress, [class*="spinner"], svg[class*="loading"], [class*="loader"]'
+                    '[role="progressbar"], progress, [class*="spinner"], [class*="loading"], [class*="loader"], [class*="progress"], [class*="spin"], [class*="animate"], svg, canvas'
                 )).some(el => el.offsetWidth > 0 && el.offsetHeight > 0);
 
                 const pctMatches = bodyText.match(/(\d{1,3})\s*%/g);
@@ -2443,9 +2441,9 @@ export class GoogleFxFlowTool extends BaseTool {
                     }
                 }
 
-                // Check aria-valuenow attributes on progress elements as fallback (always reliable)
+                // Check aria-valuenow attributes on progress elements as fallback
                 if (currentPct === null) {
-                    const progressEls = Array.from(document.querySelectorAll('[role="progressbar"], progress, [aria-valuenow]'));
+                    const progressEls = Array.from(document.querySelectorAll('[role="progressbar"], progress, [aria-valuenow], [style*="width"]'));
                     for (const el of progressEls) {
                         if (el.offsetWidth > 0 && el.offsetHeight > 0) {
                             const val = el.getAttribute('aria-valuenow') || el.getAttribute('value');
@@ -2461,7 +2459,9 @@ export class GoogleFxFlowTool extends BaseTool {
                 }
 
                 // 2. Active generation loaders / spinners / status text
-                const hasActiveSpinner = Array.from(document.querySelectorAll('[role="progressbar"], progress, [class*="spinner"], svg[class*="loading"], [class*="loader"]')).some(
+                const hasActiveSpinner = Array.from(document.querySelectorAll(
+                    '[role="progressbar"], progress, [class*="spinner"], [class*="loading"], [class*="loader"], [class*="progress"], [class*="spin"], [class*="animate"], svg, canvas'
+                )).some(
                     el => el.offsetWidth > 0 && el.offsetHeight > 0
                 );
 
@@ -2553,6 +2553,7 @@ export class GoogleFxFlowTool extends BaseTool {
                     hasTryAgainBtn,
                 };
             }, { targetType: type, excludedUrls: Array.from(excludedUrlSet) });
+
             // ── GOOGLE ERROR CHECK: "Something went wrong. Try again." ──
             // Only trigger on VISIBLE "Try again" button — NOT on chat text containing those words
             if (liveState.isGoogleError && liveState.hasTryAgainBtn) {
@@ -2580,14 +2581,11 @@ export class GoogleFxFlowTool extends BaseTool {
                 await page.waitForTimeout(800);
 
                 // Check if avatar thumbnail is still in the prompt bar
-                // If avatar was cleared by "Try again", re-add it
                 const avatarStillAttached = await page.evaluate(() => {
                     const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
-                    // Look for avatar thumbnail in prompt bar area (right side, bottom area)
                     const promptArea = Array.from(document.querySelectorAll('[role="textbox"], [contenteditable="true"]'))
                         .find(el => isVisible(el) && el.getBoundingClientRect().left > window.innerWidth * 0.6);
                     if (!promptArea) return false;
-                    // Check for img thumbnail near the prompt bar
                     let container = promptArea.parentElement;
                     for (let i = 0; i < 8 && container; i++) {
                         const imgs = container.querySelectorAll('img');
@@ -2612,7 +2610,6 @@ export class GoogleFxFlowTool extends BaseTool {
                     console.log(`      ✅ Avatar still attached in prompt bar — skipping re-add`);
                 }
 
-                // Re-upload media if available (media gets cleared on "Try again")
                 if (retryMediaUrl) {
                     console.log(`      🖼️ Re-uploading reference media for retry...`);
                     try {
@@ -2623,7 +2620,6 @@ export class GoogleFxFlowTool extends BaseTool {
                     }
                 }
 
-                // Ensure session drawer open again after panel interactions
                 await this._clickExpandButton(page);
                 await page.waitForTimeout(500);
 
@@ -2654,47 +2650,41 @@ export class GoogleFxFlowTool extends BaseTool {
                 }
             }
 
-            // Log live percentage & status updates if present in DOM & reset activity timer
-            // Guard: skip false-positive 100% (currentPct=100 but no active spinner = UI artifact)
-            if (liveState.currentPct !== null && liveState.currentPct !== lastProgressPct
-                && !(liveState.currentPct === 100 && !liveState.hasActiveSpinner)) {
-                console.log(`      🎬 Live UI Generation Progress: ${liveState.currentPct}% ${liveState.statusText ? `(${liveState.statusText})` : ''} (${elapsedSec}s)`);
-                lastProgressPct = liveState.currentPct;
-                lastActivityTime = Date.now();
+            // ── LIVE PERCENTAGE LOGGING & DATABASE UPDATE ──
+            // Calculate effective progress percentage (DOM exact % or smooth time-based estimate)
+            let effectivePct = liveState.currentPct;
 
-                if (itemId) {
-                    try {
-                        const jobsCol = getJobsCollection();
-                        await jobsCol.updateOne(
-                            { itemId },
-                            {
-                                $set: {
-                                    progressPct: liveState.currentPct,
-                                    progressStatus: liveState.statusText ? `Generating: ${liveState.statusText} (${liveState.currentPct}%)` : `Generating video (${liveState.currentPct}%)...`,
-                                    updatedAt: new Date(),
-                                }
-                            }
-                        );
-                    } catch (e) {}
-                }
-            } else if (liveState.hasActiveSpinner || liveState.isGeneratingText) {
-                lastActivityTime = Date.now();
-                if (pollCount % 3 === 0) {
-                    console.log(`      🎬 Live UI Generation Progress: ${liveState.statusText || 'Generating video in progress...'} (${elapsedSec}s)`);
-                    await this._logChatReplies(page, `Polling #${pollCount}`);
-                    if (itemId) {
-                        try {
-                            const jobsCol = getJobsCollection();
-                            await jobsCol.updateOne(
-                                { itemId },
-                                {
-                                    $set: {
-                                        progressStatus: liveState.statusText ? `Generating: ${liveState.statusText}` : 'Generating video in Google Flow...',
-                                        updatedAt: new Date(),
+            // If DOM doesn't show numeric % but generation is in progress (spinner / status text active):
+            if (effectivePct === null && (liveState.hasActiveSpinner || liveState.isGeneratingText)) {
+                // Smooth time-based percentage progression during active generation:
+                // Starts at 10% after submit, smoothly advances up to 95% over ~60s
+                const estimatedPct = Math.min(95, Math.floor(10 + (elapsedSec / 60) * 75));
+                effectivePct = estimatedPct;
+            }
+
+            if (effectivePct !== null) {
+                // Guard: skip false-positive 100% if active spinner is still running
+                if (!(effectivePct === 100 && liveState.hasActiveSpinner)) {
+                    if (effectivePct !== lastProgressPct || pollCount % 2 === 0) {
+                        console.log(`      🎬 Live UI Generation Progress: ${effectivePct}% ${liveState.statusText ? `(${liveState.statusText})` : ''} (${elapsedSec}s)`);
+                        lastProgressPct = effectivePct;
+                        lastActivityTime = Date.now();
+
+                        if (itemId) {
+                            try {
+                                const jobsCol = getJobsCollection();
+                                await jobsCol.updateOne(
+                                    { itemId },
+                                    {
+                                        $set: {
+                                            progressPct: effectivePct,
+                                            progressStatus: liveState.statusText ? `Generating: ${liveState.statusText} (${effectivePct}%)` : `Generating video (${effectivePct}%)...`,
+                                            updatedAt: new Date(),
+                                        }
                                     }
-                                }
-                            );
-                        } catch (e) {}
+                                );
+                            } catch (e) {}
+                        }
                     }
                 }
             }
