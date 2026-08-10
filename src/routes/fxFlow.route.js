@@ -4,6 +4,8 @@ import Joi from 'joi';
 import { v4 as uuidv4 } from 'uuid';
 import { getJobsCollection } from '../db.js';
 import { generationQueue } from '../queue/generationQueue.js';
+import { logger } from '../utils/logger.js';
+
 // Public API endpoints for avatar video generation (used by backend-dealerversal)
 const router = Router();
 
