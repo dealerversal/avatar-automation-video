@@ -285,13 +285,16 @@ export class GoogleFxFlowTool extends BaseTool {
         console.log('\n' + '─'.repeat(60));
         console.log('🌐  [GoogleFxFlowTool] BROWSER AUTOMATION STARTED');
         console.log('─'.repeat(60));
-        console.log(`🆔  Job ID : ${itemId || 'N/A'}`);
-        console.log(`🎬  Type   : ${type.toUpperCase()}`);
-        console.log(`💬  Prompt : "${cleanPrompt.substring(0, 100)}${cleanPrompt.length > 100 ? '...' : ''}"`);
-        console.log(`⚙️   Settings: ${JSON.stringify(settings)}`);
-        if (effectiveMediaUrl) console.log(`🖼️   Media URL: ${effectiveMediaUrl}`);
-        if (effectiveAvatarName) console.log(`👤  Avatar Name: ${effectiveAvatarName}`);
-        logger.info(`[GoogleFxFlowTool] Executing (${type}) [${itemId}]: "${cleanPrompt.substring(0, 80)}..."`);
+        console.log(`🆔  Job ID      : ${itemId || 'N/A'}`);
+        console.log(`🎬  Type        : ${type.toUpperCase()}`);
+        console.log(`⚙️   Settings    : ${JSON.stringify(settings, null, 2)}`);
+        if (effectiveMediaUrl) console.log(`🖼️   Media URL   : ${effectiveMediaUrl}`);
+        if (effectiveAvatarName) console.log(`👤  Avatar Name : ${effectiveAvatarName}`);
+        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        console.log(`💬  EXACT FULL PROMPT TO BE SUBMITTED INTO BROWSER (${cleanPrompt.length} chars):`);
+        console.log(cleanPrompt);
+        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        logger.info(`[GoogleFxFlowTool] Executing (${type}) [${itemId}]: "${cleanPrompt}"`);
 
         let context = null;
         let page = null;

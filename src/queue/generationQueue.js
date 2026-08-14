@@ -34,10 +34,13 @@ class GenerationQueue {
         const mediaUrl = currentJobData.mediaUrl || currentJobData.imageUrl || null;
 
         console.log('\n' + '═'.repeat(60));
-        console.log(`⚙️  [Queue Worker] Processing Job: ${itemId}`);
+        console.log(`⚙️  [Queue Worker] Processing Scene Creation Job: ${itemId}`);
         console.log(`🎬  Type: ${type} | Avatar: ${avatarName || 'me'} | Prompt Length: ${prompt ? prompt.length : 0} chars`);
         if (mediaUrl) console.log(`🖼️   Media URL: ${mediaUrl}`);
         if (avatarName) console.log(`👤  Avatar Name: ${avatarName}`);
+        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        console.log('📦 FULL JOB PAYLOAD DATA:');
+        console.log(JSON.stringify(currentJobData, null, 2));
         console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
         console.log('💬 FULL QUEUED PROMPT TO BE EXECUTED:');
         console.log(prompt);

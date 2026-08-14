@@ -10,9 +10,8 @@ import { logger } from '../utils/logger.js';
 const router = Router();
 
 const generateAvatarSchema = Joi.object({
-    prompt: Joi.string().min(1).max(5000).required().messages({
+    prompt: Joi.string().min(1).required().messages({
         'string.empty': 'Prompt cannot be empty',
-        'string.max': 'Prompt must be 5000 characters or less',
         'any.required': 'prompt field is required',
     }),
     type: Joi.string().valid('video', 'avatar_video').optional().default('avatar_video'),
@@ -59,18 +58,20 @@ const handleGenerateAvatarVideo = async (req, res) => {
     const itemId = `gen_${uuidv4().replace(/-/g, '').substring(0, 12)}`;
 
     console.log('\n' + '📥 '.repeat(25));
-    console.log(`📥 [FxFlowRoute] NEW AVATAR VIDEO REQUEST RECEIVED (Request ID: ${requestId})`);
-    console.log(`🆔 Item ID   : ${itemId}`);
-    console.log(`👤 Avatar Name: ${avatarName}`);
-    console.log(`🖼️ Media URL  : ${mediaUrl || 'None'}`);
-    console.log(`⚙️ Settings   : ${JSON.stringify(settings)}`);
-    console.log(`📏 Prompt Len : ${prompt.length} chars`);
+    console.log(`📥 [FxFlowRoute] NEW AVATAR SCENE CREATION REQUEST RECEIVED (Request ID: ${requestId})`);
+    console.log(`🆔 Item ID     : ${itemId}`);
+    console.log(`👤 Avatar Name : ${avatarName}`);
+    console.log(`🖼️ Media URL    : ${mediaUrl || 'None'}`);
+    console.log(`⚙️ Settings     : ${JSON.stringify(settings, null, 2)}`);
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log('💬 EXACT FULL PROMPT RECEIVED IN API REQUEST:');
+    console.log('📦 FULL RAW API REQUEST BODY (req.body):');
+    console.log(JSON.stringify(req.body, null, 2));
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log(`💬 EXACT FULL PROMPT RECEIVED IN API REQUEST (${prompt.length} chars):`);
     console.log(prompt);
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
-    logger.info(`[FxFlowRoute] [${requestId}] New avatar video request queued (avatarName: "${avatarName}"): "${prompt.substring(0, 60)}..." (itemId: ${itemId})`);
+    logger.info(`[FxFlowRoute] [${requestId}] New avatar video request queued (avatarName: "${avatarName}", itemId: ${itemId}): "${prompt}"`);
 
     try {
         const jobsCol = getJobsCollection();
