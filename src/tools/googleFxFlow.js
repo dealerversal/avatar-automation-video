@@ -2401,11 +2401,83 @@ export class GoogleFxFlowTool extends BaseTool {
     }
 
 
+    async _resubmitPromptForRetry(page) {
+        // Stop or cancel any stuck UI state if possible
+        try {
+            await page.evaluate(() => {
+                const stopBtns = Array.from(document.querySelectorAll('button')).filter(b => {
+                    const text = (b.innerText || b.textContent || '').trim().toLowerCase();
+                    const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+                    return text === 'stop' || text === 'cancel' || aria.includes('stop') || aria.includes('cancel');
+                });
+                if (stopBtns.length > 0) stopBtns[0].click();
+            });
+            await page.waitForTimeout(1500);
+        } catch (e) {}
+
+        // Ensure session drawer is open before re-adding attachments
+        await this._clickExpandButton(page);
+        await page.waitForTimeout(800);
+
+        // Check if avatar thumbnail is still in the prompt bar
+        const avatarStillAttached = await page.evaluate(() => {
+            const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+            const promptArea = Array.from(document.querySelectorAll('[role="textbox"], [contenteditable="true"]'))
+                .find(el => isVisible(el) && el.getBoundingClientRect().left > window.innerWidth * 0.6);
+            if (!promptArea) return false;
+            let container = promptArea.parentElement;
+            for (let i = 0; i < 8 && container; i++) {
+                const imgs = container.querySelectorAll('img');
+                if (imgs.length > 0) return true;
+                container = container.parentElement;
+            }
+            return false;
+        });
+
+        const retryAvatarName = this._lastAvatarName || '';
+        const retryMediaUrl = this._lastMediaUrl || '';
+
+        if (!avatarStillAttached && retryAvatarName) {
+            console.log(`      👤 Avatar not in prompt bar — re-adding avatar "${retryAvatarName}"...`);
+            try {
+                await this._addAvatarToPrompt(page, retryAvatarName);
+                await page.waitForTimeout(1000);
+            } catch (avatarErr) {
+                console.warn(`      ⚠️ Could not re-add avatar: ${avatarErr.message}`);
+            }
+        } else if (avatarStillAttached) {
+            console.log(`      ✅ Avatar still attached in prompt bar — skipping re-add`);
+        }
+
+        if (retryMediaUrl) {
+            console.log(`      🖼️ Re-uploading reference media for retry...`);
+            try {
+                await this._uploadMediaFromUrl(page, retryMediaUrl, null);
+                await page.waitForTimeout(1000);
+            } catch (uploadErr) {
+                console.warn(`      ⚠️ Could not re-upload media: ${uploadErr.message}`);
+            }
+        }
+
+        await this._clickExpandButton(page);
+        await page.waitForTimeout(500);
+
+        const retryPrompt = this._lastPrompt || '';
+        if (retryPrompt) {
+            await this._submitPrompt(page, retryPrompt);
+            await page.waitForTimeout(3000);
+            return true;
+        }
+        return false;
+    }
+
+
     async _extractResult(page, type, itemId, preExistingUrls = []) {
         const excludedUrlSet = new Set(preExistingUrls);
         const startTime = Date.now();
         let lastActivityTime = Date.now();
         let lastProgressPct = -1;
+        let stuckProgressCount = 0;
         const maxStaleMs = 600000; // Allow up to 10 minutes of active generation progress
 
         console.log(`      ⏳ Real-Time Generation Tracking: Monitoring live DOM percentage, spinners, & new ${type.toUpperCase()} assets...`);
@@ -2579,57 +2651,10 @@ export class GoogleFxFlowTool extends BaseTool {
                     await page.waitForTimeout(3000);
                 }
 
-                // Ensure session drawer is open before re-adding attachments
-                await this._clickExpandButton(page);
-                await page.waitForTimeout(800);
-
-                // Check if avatar thumbnail is still in the prompt bar
-                const avatarStillAttached = await page.evaluate(() => {
-                    const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
-                    const promptArea = Array.from(document.querySelectorAll('[role="textbox"], [contenteditable="true"]'))
-                        .find(el => isVisible(el) && el.getBoundingClientRect().left > window.innerWidth * 0.6);
-                    if (!promptArea) return false;
-                    let container = promptArea.parentElement;
-                    for (let i = 0; i < 8 && container; i++) {
-                        const imgs = container.querySelectorAll('img');
-                        if (imgs.length > 0) return true;
-                        container = container.parentElement;
-                    }
-                    return false;
-                });
-
-                const retryAvatarName = this._lastAvatarName || '';
-                const retryMediaUrl = this._lastMediaUrl || '';
-
-                if (!avatarStillAttached && retryAvatarName) {
-                    console.log(`      👤 Avatar not in prompt bar — re-adding avatar "${retryAvatarName}"...`);
-                    try {
-                        await this._addAvatarToPrompt(page, retryAvatarName);
-                        await page.waitForTimeout(1000);
-                    } catch (avatarErr) {
-                        console.warn(`      ⚠️ Could not re-add avatar: ${avatarErr.message}`);
-                    }
-                } else if (avatarStillAttached) {
-                    console.log(`      ✅ Avatar still attached in prompt bar — skipping re-add`);
-                }
-
-                if (retryMediaUrl) {
-                    console.log(`      🖼️ Re-uploading reference media for retry...`);
-                    try {
-                        await this._uploadMediaFromUrl(page, retryMediaUrl, null);
-                        await page.waitForTimeout(1000);
-                    } catch (uploadErr) {
-                        console.warn(`      ⚠️ Could not re-upload media: ${uploadErr.message}`);
-                    }
-                }
-
-                await this._clickExpandButton(page);
-                await page.waitForTimeout(500);
-
-                const retryPrompt = this._lastPrompt || '';
-                if (retryPrompt) {
-                    await this._submitPrompt(page, retryPrompt);
-                    await page.waitForTimeout(3000);
+                stuckProgressCount = 0;
+                lastProgressPct = -1;
+                const resubmitted = await this._resubmitPromptForRetry(page);
+                if (resubmitted) {
                     lastActivityTime = Date.now();
                     continue;
                 }
@@ -2644,10 +2669,10 @@ export class GoogleFxFlowTool extends BaseTool {
                 }
                 console.log(`      🔄 Retry attempt ${retryCount}/3 — re-submitting prompt...`);
                 await page.waitForTimeout(2000);
-                const retryPrompt = this._lastPrompt || '';
-                if (retryPrompt) {
-                    await this._submitPrompt(page, retryPrompt);
-                    await page.waitForTimeout(3000);
+                stuckProgressCount = 0;
+                lastProgressPct = -1;
+                const resubmitted = await this._resubmitPromptForRetry(page);
+                if (resubmitted) {
                     lastActivityTime = Date.now();
                     continue;
                 }
@@ -2670,6 +2695,14 @@ export class GoogleFxFlowTool extends BaseTool {
                 if (!(effectivePct === 100 && liveState.hasActiveSpinner)) {
                     if (effectivePct !== lastProgressPct || pollCount % 2 === 0) {
                         console.log(`      🎬 Live UI Generation Progress: ${effectivePct}% ${liveState.statusText ? `(${liveState.statusText})` : ''} (${elapsedSec}s)`);
+
+                        // If stuck at 95% (or stuck at >= 90% without advancing), increment stuck count
+                        if (effectivePct >= 95 || (effectivePct === lastProgressPct && effectivePct >= 90)) {
+                            stuckProgressCount++;
+                        } else {
+                            stuckProgressCount = 0;
+                        }
+
                         lastProgressPct = effectivePct;
                         lastActivityTime = Date.now();
 
@@ -2689,6 +2722,24 @@ export class GoogleFxFlowTool extends BaseTool {
                             } catch (e) {}
                         }
                     }
+                }
+            }
+
+            // ── STUCK AT 95% PROGRESS CHECK: if stuck log count > 10, mark as failed & retry prompt ──
+            if (stuckProgressCount > 10) {
+                console.warn(`      ⚠️ Generation progress stuck at ${effectivePct}% ${liveState.statusText ? `(${liveState.statusText})` : ''} for >10 progress logs — generation stalled. Treating as failed and retrying...`);
+                retryCount = (retryCount || 0) + 1;
+                if (retryCount > 3) {
+                    throw new Error(`[GoogleFX] ❌ Generation stuck at ${effectivePct}% repeated 3 times — aborting.`);
+                }
+                console.log(`      🔄 Stuck generation retry ${retryCount}/3 — resetting and re-submitting prompt...`);
+                stuckProgressCount = 0;
+                lastProgressPct = -1;
+
+                const resubmitted = await this._resubmitPromptForRetry(page);
+                if (resubmitted) {
+                    lastActivityTime = Date.now();
+                    continue;
                 }
             }
 
