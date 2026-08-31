@@ -316,32 +316,56 @@ export async function restartInstance(instanceId) {
 }
 
 /**
- * Deletes an instance, removes PM2 process, workspace folder, and DB record.
+ * Deletes an instance, removes PM2 process, kills port processes, removes workspace folder, and deletes DB record.
  */
 export async function deleteInstance(instanceId) {
     const cleanInstanceId = instanceId.toLowerCase().trim();
     const processName = `avatar-inst-${cleanInstanceId}`;
+    const col = getAvatarInstancesCollection();
+
+    // Fetch record to retrieve configured directories and port
+    const inst = await col.findOne({ instanceId: cleanInstanceId });
 
     // 1. Delete PM2 process
-    await runPm2(`delete ${processName} || true`);
-    await runPm2('save');
+    try {
+        await execPromise(`pm2 delete ${processName} || true`);
+        await execPromise(`pm2 save --force || true`);
+    } catch (pm2Err) {
+        logger.warn(`[InstanceManager] PM2 delete warning for ${processName}: ${pm2Err.message}`);
+    }
 
-    // 2. Remove instance workspace folder cleanly
-    const instanceDir = path.join(INSTANCES_ROOT_DIR, cleanInstanceId);
-    if (fs.existsSync(instanceDir)) {
+    // 2. Kill any lingering process listening on the instance port if applicable
+    if (inst?.port) {
         try {
-            fs.rmSync(instanceDir, { recursive: true, force: true });
-        } catch (rmErr) {
-            logger.warn(`[InstanceManager] Error deleting workspace ${instanceDir}: ${rmErr.message}`);
+            await execPromise(`fuser -k ${inst.port}/tcp || true`);
+        } catch (portErr) {
+            // ignore if nothing was listening
         }
     }
 
-    // 3. Remove DB record
-    const col = getAvatarInstancesCollection();
-    await col.deleteOne({ instanceId: cleanInstanceId });
+    // 3. Remove instance workspace folder cleanly from filesystem
+    const targetDirs = [
+        inst?.projectDir,
+        path.join(INSTANCES_ROOT_DIR, cleanInstanceId),
+        path.join(BASE_PROJECT_DIR, 'instances', cleanInstanceId),
+    ].filter(Boolean);
 
-    logger.info(`[InstanceManager] Deleted instance "${cleanInstanceId}" and cleaned up workspace.`);
-    return { success: true, message: `Instance ${cleanInstanceId} deleted.` };
+    for (const dir of targetDirs) {
+        if (fs.existsSync(dir)) {
+            try {
+                fs.rmSync(dir, { recursive: true, force: true });
+                logger.info(`[InstanceManager] Removed workspace directory: ${dir}`);
+            } catch (rmErr) {
+                logger.warn(`[InstanceManager] Error deleting workspace ${dir}: ${rmErr.message}`);
+            }
+        }
+    }
+
+    // 4. Remove DB record from collection
+    await col.deleteMany({ instanceId: cleanInstanceId });
+
+    logger.info(`[InstanceManager] Successfully deleted instance "${cleanInstanceId}" and purged all resources.`);
+    return { success: true, message: `Instance ${cleanInstanceId} deleted successfully.` };
 }
 
 /**
