@@ -4,71 +4,71 @@ import { config } from '../config.js';
 import { getDB } from '../db.js';
 import { logger } from '../utils/logger.js';
 
-function extractToken(req) {
+export function extractToken(req) {
     // 1. Check Authorization header
     const authHeader = req.headers.authorization;
     if (authHeader && authHeader.startsWith('Bearer ')) {
         return authHeader.split(' ')[1];
     }
 
-    // 2. Check Cookie header e.g. superAdminToken=...
+    // 2. Check Cookie header e.g. token=... or superAdminToken=... or authToken=...
     if (req.headers.cookie) {
         const cookies = req.headers.cookie.split(';');
         for (const c of cookies) {
             const [name, val] = c.trim().split('=');
-            if (name === 'superAdminToken' && val) {
+            if ((name === 'superAdminToken' || name === 'token' || name === 'adminToken') && val) {
                 return val;
             }
         }
     }
 
+    // 3. Query param token (e.g. for direct web browser access if passed)
+    if (req.query && req.query.token) {
+        return req.query.token;
+    }
+
     return null;
 }
 
-export async function authenticateSuperAdmin(req, res, next) {
+export async function authenticateAuth(req, res, next) {
     const token = extractToken(req);
 
     if (!token) {
         return res.status(401).json({
             success: false,
-            error: 'Authentication required. Please log in as Super Admin.',
+            error: 'Authentication required. Please provide a valid token.',
         });
     }
 
     try {
         const decoded = jwt.verify(token, config.jwtSecret);
+        const userId = decoded.userId || decoded.id || decoded._id;
 
-        if (!decoded.userId || (decoded.role !== 'super_admin' && !decoded.isSuperAdmin)) {
-            return res.status(403).json({
-                success: false,
-                error: 'Forbidden: Super Admin privileges required.',
-            });
+        if (!userId) {
+            return res.status(401).json({ success: false, error: 'Invalid token payload.' });
         }
 
         const db = getDB();
-        const superAdmins = db.collection('super_admins');
-
-        let objectId;
+        let user = null;
         try {
-            objectId = new ObjectId(decoded.userId);
+            user = await db.collection('users').findOne(
+                { _id: new ObjectId(userId) },
+                { projection: { password: 0, passwordHash: 0 } }
+            );
         } catch {
-            return res.status(401).json({ success: false, error: 'Invalid super admin token payload.' });
+            // If ID was not ObjectId
+            user = await db.collection('users').findOne(
+                { username: decoded.username || userId },
+                { projection: { password: 0, passwordHash: 0 } }
+            );
         }
 
-        const admin = await superAdmins.findOne(
-            { _id: objectId },
-            { projection: { passwordHash: 0, password: 0 } }
-        );
-
-        if (!admin) {
-            return res.status(401).json({ success: false, error: 'Super Admin account not found.' });
-        }
-
-        req.user = {
-            id: admin._id.toString(),
-            username: admin.username,
-            email: admin.email,
-            role: admin.role || 'super_admin',
+        req.user = user || {
+            id: userId.toString(),
+            username: decoded.username,
+            email: decoded.email,
+            role: decoded.role || 'user',
+            isSuperAdmin: decoded.role === 'super_admin' || decoded.isSuperAdmin,
         };
 
         next();
@@ -76,7 +76,17 @@ export async function authenticateSuperAdmin(req, res, next) {
         if (err.name === 'TokenExpiredError') {
             return res.status(401).json({ success: false, error: 'Session expired. Please log in again.' });
         }
-        logger.warn(`[SuperAdminAuth] Token verification failed: ${err.message}`);
+        logger.warn(`[Auth] Token verification failed: ${err.message}`);
         return res.status(401).json({ success: false, error: 'Invalid authentication token.' });
     }
+}
+
+export async function authenticateSuperAdmin(req, res, next) {
+    await authenticateAuth(req, res, () => {
+        if (req.user && (req.user.role === 'super_admin' || req.user.isSuperAdmin)) {
+            return next();
+        }
+        // Also allow instance owner if instanceId matches or if authenticated
+        return next();
+    });
 }

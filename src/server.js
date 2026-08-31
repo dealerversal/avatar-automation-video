@@ -27,7 +27,7 @@ app.set('trust proxy', 1);
 
 // Middleware: CORS & Static Files
 app.use(cors());
-app.use('/downloads', express.static(path.join(process.cwd(), 'downloads')));
+app.use('/downloads', express.static(config.downloadsDir || path.join(process.cwd(), 'downloads')));
 app.use(express.static(path.join(process.cwd(), 'public')));
 
 // Middleware: JSON & URL-encoded body parsers (500mb payload limit)
@@ -42,7 +42,7 @@ app.use((req, _res, next) => {
 
 // Middleware: Request logger
 app.use((req, _res, next) => {
-    logger.info(`[Server] ${req.method} ${req.path} [${req.requestId}]`);
+    logger.info(`[Server:${config.instanceId}] ${req.method} ${req.path} [${req.requestId}]`);
     next();
 });
 
@@ -73,12 +73,15 @@ app.get('/health', (_req, res) => {
     res.json({
         status: 'ok',
         service: 'google-fx-flow-automation',
+        instanceId: config.instanceId,
+        port: config.port,
         timestamp: new Date().toISOString(),
         tools: registry.getToolNames(),
     });
 });
 
 // Primary API routes
+app.use('/api/auth', superAdminRouter);
 app.use('/api/super-admin', superAdminRouter);
 app.use('/api/fx-flow', fxFlowRouter);
 app.use('/api/session', sessionRouter);

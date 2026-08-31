@@ -11,8 +11,8 @@ export async function connectDB() {
 
     try {
         const uri = config.mongodbUri;
-        logger.info(`[DB] Connecting to MongoDB via native driver...`);
-        console.log(`\n🗄️  [DB] Connecting to MongoDB (native driver)...`);
+        logger.info(`[DB] Connecting to MongoDB (${config.mongodbName})...`);
+        console.log(`\n🗄️  [DB] Connecting to MongoDB (${config.mongodbName})...`);
 
         clientInstance = new MongoClient(uri, {
             serverSelectionTimeoutMS: 10000,
@@ -22,15 +22,17 @@ export async function connectDB() {
         const dbName = config.mongodbName;
         dbInstance = clientInstance.db(dbName);
 
-        // Create index on itemId
+        // Create index on itemId and instanceId
         await dbInstance.collection('generation_jobs').createIndex({ itemId: 1 }, { unique: true });
+        await dbInstance.collection('generation_jobs').createIndex({ instanceId: 1, createdAt: -1 });
 
-        // Create indexes on super_admins collection
-        await dbInstance.collection('super_admins').createIndex({ email: 1 }, { unique: true });
-        await dbInstance.collection('super_admins').createIndex({ username: 1 }, { unique: true });
+        // Ensure index on avatar_instances
+        await dbInstance.collection('avatar_instances').createIndex({ instanceId: 1 }, { unique: true });
+        await dbInstance.collection('avatar_instances').createIndex({ userId: 1 });
+        await dbInstance.collection('avatar_instances').createIndex({ username: 1 });
 
-        logger.info(`[DB] Connected to MongoDB native driver successfully.`);
-        console.log(`✅ [DB] Connected to MongoDB (collection: generation_jobs) successfully.\n`);
+        logger.info(`[DB] Connected to MongoDB (${dbName}) successfully.`);
+        console.log(`✅ [DB] Connected to MongoDB (${dbName}) successfully.\n`);
         return dbInstance;
     } catch (err) {
         logger.error(`[DB] MongoDB connection error:`, err);
@@ -48,4 +50,8 @@ export function getDB() {
 
 export function getJobsCollection() {
     return getDB().collection('generation_jobs');
+}
+
+export function getAvatarInstancesCollection() {
+    return getDB().collection('avatar_instances');
 }

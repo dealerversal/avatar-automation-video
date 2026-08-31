@@ -81,5 +81,8 @@ jobs:
             fi
             pm2 start ecosystem.config.cjs --env production
 
+            # Propagate codebase updates to all cloned avatar instance workspaces
+            node scripts/sync-all-instances.js || true
+
             pm2 save
           "

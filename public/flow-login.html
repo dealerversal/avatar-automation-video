@@ -271,6 +271,16 @@
     <script>
         let isAuthenticatedSession = false;
 
+        // Dynamic API URL Helper for multi-instance subpath routing
+        function getApiUrl(endpoint) {
+            const parts = window.location.pathname.split('/').filter(Boolean);
+            if (parts.length >= 2 && parts[parts.length - 1] === 'flow-login') {
+                const instanceId = parts[0];
+                return `/${instanceId}${endpoint}`;
+            }
+            return endpoint;
+        }
+
         // Utility: Get Cookie
         function getCookie(name) {
             const value = `; ${document.cookie}`;
@@ -292,6 +302,15 @@
         }
 
         function getAuthToken() {
+            try {
+                const urlParams = new URLSearchParams(window.location.search);
+                const qToken = urlParams.get('token');
+                if (qToken) {
+                    setCookie('superAdminToken', qToken, 15);
+                    localStorage.setItem('superAdminToken', qToken);
+                    return qToken;
+                }
+            } catch (e) {}
             return getCookie('superAdminToken') || localStorage.getItem('superAdminToken');
         }
 
@@ -300,7 +319,7 @@
             pwd.type = pwd.type === 'password' ? 'text' : 'password';
         }
 
-        // Handle Super Admin Email & Password Login
+        // Handle Login
         async function handleSuperAdminLogin(e) {
             e.preventDefault();
             const email = document.getElementById('adminEmail').value;
@@ -315,7 +334,7 @@
             errAlert.classList.add('hidden');
 
             try {
-                const res = await fetch('/api/super-admin/login', {
+                const res = await fetch(getApiUrl('/api/auth/login'), {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ email, password }),
@@ -330,7 +349,7 @@
                     localStorage.setItem('superAdminToken', data.token);
                     showSessionManagerView();
                 } else {
-                    errText.innerText = data.error || 'Invalid super admin credentials';
+                    errText.innerText = data.error || 'Invalid credentials';
                     errAlert.classList.remove('hidden');
                 }
             } catch (err) {
@@ -341,7 +360,7 @@
             }
         }
 
-        // Verify Super Admin token on init
+        // Verify token on init
         async function initAuth() {
             const token = getAuthToken();
             if (!token) {
@@ -350,7 +369,7 @@
             }
 
             try {
-                const res = await fetch('/api/super-admin/me', {
+                const res = await fetch(getApiUrl('/api/auth/me'), {
                     headers: { 'Authorization': `Bearer ${token}` },
                 });
                 const data = await res.json();
@@ -456,7 +475,7 @@
             const token = getAuthToken();
 
             try {
-                const res = await fetch('/api/session/status', {
+                const res = await fetch(getApiUrl('/api/session/status'), {
                     headers: { 'Authorization': `Bearer ${token}` },
                 });
 
@@ -583,7 +602,7 @@
 
             const token = getAuthToken();
             const xhr = new XMLHttpRequest();
-            xhr.open('POST', '/api/session/upload-zip', true);
+            xhr.open('POST', getApiUrl('/api/session/upload-zip'), true);
             xhr.setRequestHeader('Content-Type', 'application/zip');
             if (token) {
                 xhr.setRequestHeader('Authorization', `Bearer ${token}`);
@@ -646,7 +665,7 @@
             if (!confirm('Are you sure you want to clear the browser profile on VPS?')) return;
             const token = getAuthToken();
             try {
-                const res = await fetch('/api/session/clear', {
+                const res = await fetch(getApiUrl('/api/session/clear'), {
                     method: 'POST',
                     headers: { 'Authorization': `Bearer ${token}` },
                 });
