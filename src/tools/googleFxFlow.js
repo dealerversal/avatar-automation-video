@@ -1024,15 +1024,15 @@ export class GoogleFxFlowTool extends BaseTool {
             // HARDCODED: count/multiplier is ALWAYS x1 as requested by user
             const targetCountText = 'x1';
 
-            const rawModelStr = String(settings.model || 'Omni Flash').trim();
+            const rawModelStr = String(settings.model || 'Omni 1.1 Flash').trim();
 
             const normalizeModel = (m, isVid) => {
                 const l = m.toLowerCase();
                 if (!isVid) {
-                    if (l.includes('banana 2') || l.includes('nano 2')) return 'Nano Banana 2';
+                    if (l.includes('banana 2') || l.includes('nano 2') || l.includes('banana')) return 'Nano Banana 2';
                     if (l.includes('imagen')) return 'Imagen 3';
                 } else {
-                    if (l.includes('omni') || l.includes('flash')) return 'Omni Flash';
+                    if (l.includes('omni') || l.includes('flash') || l.includes('1.1')) return 'Omni 1.1 Flash';
                     if (l.includes('veo 3.1 - lite') || l.includes('lite')) return 'Veo 3.1 - Lite';
                     if (l.includes('veo 3.1 - fast') || l.includes('fast')) return 'Veo 3.1 - Fast';
                     if (l.includes('veo 3.1 - quality') || l.includes('quality')) return 'Veo 3.1 - Quality';
@@ -1126,7 +1126,7 @@ export class GoogleFxFlowTool extends BaseTool {
             await page.waitForTimeout(1000);
 
             // 4c. Model Dropdown Selection via physical mouse click
-            const dropdownCoords = await page.evaluate(({ isVid }) => {
+            const dropdownState = await page.evaluate(({ isVid, targetModelName }) => {
                 const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
                 const targetTitle = isVid ? 'video generation default' : 'image generation default';
                 const allMatching = Array.from(document.querySelectorAll('*')).filter(el => {
@@ -1151,44 +1151,99 @@ export class GoogleFxFlowTool extends BaseTool {
                 });
 
                 if (dropdownBtn) {
+                    const btnText = (dropdownBtn.innerText || dropdownBtn.textContent || '').trim();
+                    const btnTextLower = btnText.toLowerCase();
+                    const targetLower = targetModelName.toLowerCase();
+                    const isAlreadySelected = btnTextLower.includes(targetLower) ||
+                        (targetLower.includes('omni') && (btnTextLower.includes('omni') || btnTextLower.includes('flash'))) ||
+                        (targetLower.includes('banana') && btnTextLower.includes('banana'));
+
                     if (window.__highlight) window.__highlight(dropdownBtn);
                     const r = dropdownBtn.getBoundingClientRect();
-                    return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2) };
+                    return {
+                        cx: Math.round(r.left + r.width / 2),
+                        cy: Math.round(r.top + r.height / 2),
+                        currentText: btnText,
+                        isAlreadySelected,
+                    };
                 }
                 return null;
-            }, { isVid: isVideoJob });
+            }, { isVid: isVideoJob, targetModelName });
 
-            if (dropdownCoords && dropdownCoords.cx > 0 && dropdownCoords.cy > 0) {
-                console.log(`      🖱️ Mouse clicking Model dropdown at [${dropdownCoords.cx}, ${dropdownCoords.cy}]...`);
-                try { await page.mouse.click(dropdownCoords.cx, dropdownCoords.cy); } catch {}
-                await page.waitForTimeout(1200);
-
-                const optionCoords = await page.evaluate((modelName) => {
-                    const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
-                    const searchLower = modelName.toLowerCase();
-                    const options = Array.from(document.querySelectorAll('button[role="menuitem"], [role="option"], [role="menuitemradio"], button, div'))
-                        .filter(el => isVisible(el) && (el.innerText || el.textContent || '').trim().length > 0);
-                    const match = options.find(el => {
-                        const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
-                        return txt === searchLower || txt.includes(searchLower);
-                    });
-                    if (match) {
-                        if (window.__highlight) window.__highlight(match);
-                        const r = match.getBoundingClientRect();
-                        return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2) };
-                    }
-                    return null;
-                }, targetModelName);
-
-                if (optionCoords && optionCoords.cx > 0 && optionCoords.cy > 0) {
-                    console.log(`      🖱️ Mouse clicking Model option "${targetModelName}" at [${optionCoords.cx}, ${optionCoords.cy}]...`);
-                    try { await page.mouse.click(optionCoords.cx, optionCoords.cy); } catch {}
-                    console.log(`      ✅ Selected Model "${targetModelName}" for ${isVideoJob ? 'Video' : 'Image'} generation default`);
+            if (dropdownState && dropdownState.cx > 0 && dropdownState.cy > 0) {
+                if (dropdownState.isAlreadySelected) {
+                    console.log(`      ✅ Model is already set to "${dropdownState.currentText}" (matches target "${targetModelName}")`);
                 } else {
-                    console.warn(`      ⚠️ Model option "${targetModelName}" not found in dropdown menu`);
+                    console.log(`      🖱️ Mouse clicking Model dropdown (current: "${dropdownState.currentText}") at [${dropdownState.cx}, ${dropdownState.cy}]...`);
+                    try { await page.mouse.click(dropdownState.cx, dropdownState.cy); } catch {}
+                    await page.waitForTimeout(1200);
+
+                    const optionCoords = await page.evaluate((modelName) => {
+                        const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+                        const searchLower = modelName.toLowerCase();
+                        const options = Array.from(document.querySelectorAll('button[role="menuitem"], [role="option"], [role="menuitemradio"], [role="menuitemcheckbox"], [data-radix-collection-item], button, div, li, span'))
+                            .filter(el => isVisible(el) && (el.innerText || el.textContent || '').trim().length > 0 && (el.innerText || el.textContent || '').trim().length < 60);
+
+                        // 1. Exact match
+                        let match = options.find(el => {
+                            const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
+                            return txt === searchLower;
+                        });
+
+                        // 2. Contains full target name
+                        if (!match) {
+                            match = options.find(el => {
+                                const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
+                                return txt.includes(searchLower);
+                            });
+                        }
+
+                        // 3. Match Omni / Flash / 1.1 variations
+                        if (!match && (searchLower.includes('omni') || searchLower.includes('flash'))) {
+                            match = options.find(el => {
+                                const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
+                                return txt.includes('omni') && txt.includes('flash');
+                            }) || options.find(el => {
+                                const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
+                                return txt.includes('omni');
+                            });
+                        }
+
+                        // 4. Match Nano Banana / Imagen
+                        if (!match && (searchLower.includes('banana') || searchLower.includes('nano'))) {
+                            match = options.find(el => {
+                                const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
+                                return txt.includes('banana') || txt.includes('nano');
+                            });
+                        }
+
+                        // 5. Match Veo
+                        if (!match && searchLower.includes('veo')) {
+                            match = options.find(el => {
+                                const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
+                                return txt.includes('veo');
+                            });
+                        }
+
+                        if (match) {
+                            const clickTarget = match.closest('button, [role="menuitem"], [role="option"], [data-radix-collection-item]') || match;
+                            if (window.__highlight) window.__highlight(clickTarget);
+                            const r = clickTarget.getBoundingClientRect();
+                            return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2) };
+                        }
+                        return null;
+                    }, targetModelName);
+
+                    if (optionCoords && optionCoords.cx > 0 && optionCoords.cy > 0) {
+                        console.log(`      🖱️ Mouse clicking Model option "${targetModelName}" at [${optionCoords.cx}, ${optionCoords.cy}]...`);
+                        try { await page.mouse.click(optionCoords.cx, optionCoords.cy); } catch {}
+                        console.log(`      ✅ Selected Model "${targetModelName}" for ${isVideoJob ? 'Video' : 'Image'} generation default`);
+                    } else {
+                        console.warn(`      ⚠️ Model option "${targetModelName}" not found in dropdown menu — keeping default "${dropdownState.currentText}"`);
+                    }
                 }
             } else {
-                console.warn(`      ⚠️ Could not open Model dropdown in ${isVideoJob ? 'Video' : 'Image'} generation default`);
+                console.warn(`      ⚠️ Could not locate Model dropdown in ${isVideoJob ? 'Video' : 'Image'} generation default`);
             }
             await page.waitForTimeout(1000);
 
