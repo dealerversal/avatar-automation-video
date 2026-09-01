@@ -30,6 +30,34 @@ export async function closeSharedContext() {
     }
 }
 
+/**
+ * Executes a page.evaluate with automatic retries if the execution context was destroyed
+ * due to an ongoing page navigation, redirection, or component re-render.
+ */
+export async function safeEvaluate(page, fn, ...args) {
+    if (!page || page.isClosed()) throw new Error('Page is closed or undefined');
+    for (let attempt = 1; attempt <= 4; attempt++) {
+        try {
+            return await page.evaluate(fn, ...args);
+        } catch (err) {
+            const msg = (err.message || '').toLowerCase();
+            const isNavigationError = msg.includes('execution context was destroyed') ||
+                msg.includes('target closed') ||
+                msg.includes('cannot find context') ||
+                msg.includes('frame was detached');
+
+            if (isNavigationError && attempt < 4) {
+                console.warn(`      ⚠️ Page is navigating/re-rendering (attempt ${attempt}/4). Waiting 1.5s for DOM to settle...`);
+                try { await page.waitForLoadState('domcontentloaded', { timeout: 6000 }); } catch (_) {}
+                await page.waitForTimeout(1500);
+            } else {
+                throw err;
+            }
+        }
+    }
+}
+
+
 
 export class GoogleFxFlowTool extends BaseTool {
     get name() {
@@ -1377,7 +1405,7 @@ export class GoogleFxFlowTool extends BaseTool {
             // The Expand button opens the Agent panel on the RIGHT side of the screen.
             // The '+' (add_2/Create) button is in the BOTTOM of that right-side panel.
             // Right panel: x > ~1180px, bottom bar: y > ~700px (in 1470x776 viewport)
-            const coords = await page.evaluate(() => {
+            const coords = await safeEvaluate(page, () => {
                 const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
                 const allBtns = Array.from(document.querySelectorAll('button, [role="button"]'));
 
@@ -1439,7 +1467,7 @@ export class GoogleFxFlowTool extends BaseTool {
                 try { await page.mouse.click(coords.cx, coords.cy); } catch {}
                 await page.waitForTimeout(2000);
 
-                const panelOpen = await page.evaluate(() => {
+                const panelOpen = await safeEvaluate(page, () => {
                     return Array.from(document.querySelectorAll('input[placeholder]')).some(i =>
                         i.offsetWidth > 0 && (i.getAttribute('placeholder') || '').toLowerCase().includes('search assets')
                     );
@@ -1454,6 +1482,7 @@ export class GoogleFxFlowTool extends BaseTool {
             }
             await page.waitForTimeout(1000);
         }
+
 
         console.warn('[GoogleFX] ⚠️ Could not open media drawer via "+" button.');
         return false;

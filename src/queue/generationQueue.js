@@ -3,6 +3,8 @@ import { getJobsCollection } from '../db.js';
 import { registry } from '../mcp/registry.js';
 import { logger } from '../utils/logger.js';
 import { triggerServerRestart } from '../utils/restart.js';
+import { closeSharedContext } from '../tools/googleFxFlow.js';
+
 
 class GenerationQueue {
     constructor() {
@@ -106,9 +108,9 @@ class GenerationQueue {
 
             if (currentRetryCount < maxRetries) {
                 const nextRetryCount = currentRetryCount + 1;
-                logger.warn(`[Queue Worker] Job ${itemId} failed (Attempt ${currentRetryCount + 1}/${maxRetries + 1}). Triggering PM2 restart and scheduling retry #${nextRetryCount}/${maxRetries} in 10s. Error: ${err.message}`);
+                logger.warn(`[Queue Worker] Job ${itemId} failed (Attempt ${currentRetryCount + 1}/${maxRetries + 1}). Tearing down browser context & scheduling retry #${nextRetryCount}/${maxRetries} in 5s. Error: ${err.message}`);
                 console.error(`\n⚠️  [Queue Worker] Job ${itemId} FAILED (Attempt ${currentRetryCount + 1}/${maxRetries + 1}): ${err.message}`);
-                console.log(`🔄 [Queue Worker] Triggering PM2 restart & scheduling Retry #${nextRetryCount} in 10 seconds...\n`);
+                console.log(`🔄 [Queue Worker] Closing browser context & scheduling Retry #${nextRetryCount} in 5 seconds...\n`);
 
                 await jobsCol.updateOne(
                     { itemId },
@@ -122,13 +124,17 @@ class GenerationQueue {
                     }
                 );
 
-                // 1. Trigger PM2 restart (or restart utility) before retry
-                triggerServerRestart(500);
+                // 1. Teardown shared browser context cleanly so next attempt starts with a clean slate
+                try {
+                    await closeSharedContext();
+                } catch (closeErr) {
+                    console.warn(`[Queue Worker] Warning closing browser context during retry: ${closeErr.message}`);
+                }
 
-                // 2. Wait 10 seconds after PM2 restart before retrying request
-                await new Promise((resolve) => setTimeout(resolve, 10000));
+                // 2. Wait 5 seconds for resources to settle
+                await new Promise((resolve) => setTimeout(resolve, 5000));
 
-                // 3. Re-enqueue request for retry if process didn't restart immediately
+                // 3. Re-enqueue request for retry
                 if (!this.queue.some(j => j.itemId === itemId)) {
                     this.addJob({
                         ...currentJobData,
@@ -138,6 +144,7 @@ class GenerationQueue {
             } else {
                 logger.error(`[Queue Worker] Job ${itemId} failed permanently after ${maxRetries} retries:`, err);
                 console.error(`\n❌ [Queue Worker] Job ${itemId} FAILED permanently after ${maxRetries} retries: ${err.message}\n`);
+
 
                 await jobsCol.updateOne(
                     { itemId },
