@@ -2751,16 +2751,6 @@ export class GoogleFxFlowTool extends BaseTool {
                     if (effectivePct !== lastProgressPct || pollCount % 2 === 0) {
                         console.log(`      🎬 Live UI Generation Progress: ${effectivePct}% ${liveState.statusText ? `(${liveState.statusText})` : ''} (${elapsedSec}s)`);
 
-                        // If stuck at 95% (or stuck at >= 90% without advancing), increment stuck count
-                        if (effectivePct >= 95 || (effectivePct === lastProgressPct && effectivePct >= 90)) {
-                            stuckProgressCount++;
-                        } else {
-                            stuckProgressCount = 0;
-                        }
-
-                        lastProgressPct = effectivePct;
-                        lastActivityTime = Date.now();
-
                         if (itemId) {
                             try {
                                 const jobsCol = getJobsCollection();
@@ -2777,19 +2767,49 @@ export class GoogleFxFlowTool extends BaseTool {
                             } catch (e) {}
                         }
                     }
+
+                    // ── Increment stuck counter on every poll tick if progress >= 90% and not completed ──
+                    if (effectivePct >= 95 || (effectivePct === lastProgressPct && effectivePct >= 90)) {
+                        stuckProgressCount++;
+                        console.log(`      ⏳ Generation holding at ${effectivePct}% [stuck check ${stuckProgressCount}/10] (${elapsedSec}s)`);
+                    } else {
+                        stuckProgressCount = 0;
+                    }
+
+                    lastProgressPct = effectivePct;
+                    lastActivityTime = Date.now();
+                }
+            } else {
+                if (elapsedSec > 30) {
+                    stuckProgressCount++;
                 }
             }
 
-            // ── STUCK AT 95% PROGRESS CHECK: if stuck log count > 10, mark as failed & retry prompt ──
-            if (stuckProgressCount > 10) {
-                console.warn(`      ⚠️ Generation progress stuck at ${effectivePct}% ${liveState.statusText ? `(${liveState.statusText})` : ''} for >10 progress logs — generation stalled. Treating as failed and retrying...`);
+            // ── STUCK AT 95% PROGRESS CHECK: if stuck count >= 10, mark as failed & retry prompt ──
+            if (stuckProgressCount >= 10) {
+                console.warn(`      ⚠️ Generation progress stuck at ${effectivePct || 95}% ${liveState.statusText ? `(${liveState.statusText})` : ''} for 10 checks (~50s) — generation stalled/failed. Triggering instant retry...`);
                 retryCount = (retryCount || 0) + 1;
                 if (retryCount > 3) {
-                    throw new Error(`[GoogleFX] ❌ Generation stuck at ${effectivePct}% repeated 3 times — aborting.`);
+                    throw new Error(`[GoogleFX] ❌ Generation stuck at ${effectivePct || 95}% repeated 3 times — aborting.`);
                 }
                 console.log(`      🔄 Stuck generation retry ${retryCount}/3 — resetting and re-submitting prompt...`);
                 stuckProgressCount = 0;
                 lastProgressPct = -1;
+
+                if (itemId) {
+                    try {
+                        const jobsCol = getJobsCollection();
+                        await jobsCol.updateOne(
+                            { itemId },
+                            {
+                                $set: {
+                                    progressStatus: `Generation stalled at ${effectivePct || 95}%. Retrying attempt ${retryCount}/3...`,
+                                    updatedAt: new Date(),
+                                }
+                            }
+                        );
+                    } catch (e) {}
+                }
 
                 const resubmitted = await this._resubmitPromptForRetry(page);
                 if (resubmitted) {
