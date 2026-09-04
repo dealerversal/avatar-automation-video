@@ -730,49 +730,58 @@ export class GoogleFxFlowTool extends BaseTool {
      */
     async _enableAgentMode(page) {
         console.log(`      🤖 Enabling Agent mode pill (hardcoded)...`);
-        await page.evaluate(() => {
-            const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
-            const containers = Array.from(document.querySelectorAll(
-                '.sc-c9e4708a-0, .sc-5c3af813-0, [class*="sc-c9e4708a"], [class*="sc-5c3af813"]'
-            )).filter(c => isVisible(c) && !c.closest('.sc-e4f4e472-3'));
-            const promptBar = containers.length > 0 ? containers[containers.length - 1] : document.body;
 
-            const agentBtn = promptBar.querySelector('button.sc-59223abb-3, button[class*="59223abb"]')
-                || Array.from(promptBar.querySelectorAll('button')).find(b =>
-                    (b.innerText || b.textContent || '').trim() === 'Agent'
-                );
+        // Try to find and click the "Agent" toggle pill button
+        const agentBtnClicked = await page.evaluate(() => {
+            const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+
+            // Find any button/toggle labeled "Agent" — look bottom prompt bar area first
+            const allBtns = Array.from(document.querySelectorAll('button, [role="button"], [role="tab"], [role="switch"]'));
+
+            // Agent pill is usually near the prompt input — find it by text content
+            const agentBtn = allBtns.find(b => {
+                if (!isVisible(b)) return false;
+                const txt = (b.innerText || b.textContent || '').trim();
+                return txt === 'Agent' || txt.toLowerCase() === 'agent mode';
+            });
 
             if (agentBtn) {
                 const cls = agentBtn.className || '';
                 const isOn = cls.includes('bdRbOx')
                     || agentBtn.getAttribute('aria-pressed') === 'true'
                     || agentBtn.getAttribute('aria-checked') === 'true'
-                    || agentBtn.getAttribute('data-state') === 'on';
+                    || agentBtn.getAttribute('data-state') === 'on'
+                    || agentBtn.getAttribute('data-active') === 'true';
                 if (!isOn) {
                     console.log('[AgentMode] Clicking Agent pill to enable agent mode...');
                     if (window.__highlight) window.__highlight(agentBtn);
                     agentBtn.click();
-                    agentBtn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
                 } else {
                     console.log('[AgentMode] Agent mode already enabled.');
                 }
-            } else {
-                console.warn('[AgentMode] Agent pill button not found in prompt bar.');
+                return true;
             }
+            return false;
         });
+
         await page.waitForTimeout(1200);
 
-        // Verify agent mode is on
+        // Verify agent mode is on (by checking for the Agent button active state)
         const isAgentOn = await page.evaluate(() => {
-            const containers = Array.from(document.querySelectorAll(
-                '.sc-c9e4708a-0, .sc-5c3af813-0, [class*="sc-c9e4708a"], [class*="sc-5c3af813"]'
-            )).filter(c => c.offsetWidth > 0 && !c.closest('.sc-e4f4e472-3'));
-            const promptBar = containers.length > 0 ? containers[containers.length - 1] : document.body;
-            const agentBtn = promptBar.querySelector('button.sc-59223abb-3, button[class*="59223abb"]')
-                || Array.from(promptBar.querySelectorAll('button')).find(b =>
-                    (b.innerText || b.textContent || '').trim() === 'Agent'
-                );
-            if (!agentBtn) return false;
+            const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+            const allBtns = Array.from(document.querySelectorAll('button, [role="button"], [role="tab"], [role="switch"]'));
+            const agentBtn = allBtns.find(b => {
+                if (!isVisible(b)) return false;
+                const txt = (b.innerText || b.textContent || '').trim();
+                return txt === 'Agent' || txt.toLowerCase() === 'agent mode';
+            });
+            if (!agentBtn) {
+                // If no Agent button found, check if session panel / agent UI elements are present
+                // In the new Flow UI, the session panel IS the agent panel — no toggle needed
+                const hasSessionPanel = Array.from(document.querySelectorAll('[role="textbox"], [contenteditable="true"], textarea'))
+                    .some(el => el.offsetWidth > 0 && el.getBoundingClientRect().left > window.innerWidth * 0.5);
+                return hasSessionPanel;
+            }
             const cls = agentBtn.className || '';
             return cls.includes('bdRbOx')
                 || agentBtn.getAttribute('aria-pressed') === 'true'
@@ -782,18 +791,18 @@ export class GoogleFxFlowTool extends BaseTool {
 
         if (isAgentOn) {
             console.log(`      ✅ Agent mode confirmed ON`);
+        } else if (!agentBtnClicked) {
+            console.warn(`      ⚠️ Agent mode pill not found — new Flow UI may already be in Agent mode by default`);
         } else {
-            console.warn(`      ⚠️ Agent mode may not be active — attempting fallback click`);
+            console.warn(`      ⚠️ Agent mode may not be active — attempting fallback physical click`);
             const coords = await page.evaluate(() => {
                 const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
-                const containers = Array.from(document.querySelectorAll(
-                    '.sc-c9e4708a-0, .sc-5c3af813-0, [class*="sc-c9e4708a"], [class*="sc-5c3af813"]'
-                )).filter(c => isVisible(c) && !c.closest('.sc-e4f4e472-3'));
-                const promptBar = containers.length > 0 ? containers[containers.length - 1] : document.body;
-                const agentBtn = promptBar.querySelector('button.sc-59223abb-3, button[class*="59223abb"]')
-                    || Array.from(promptBar.querySelectorAll('button')).find(b =>
-                        (b.innerText || b.textContent || '').trim() === 'Agent'
-                    );
+                const allBtns = Array.from(document.querySelectorAll('button, [role="button"], [role="tab"]'));
+                const agentBtn = allBtns.find(b => {
+                    if (!isVisible(b)) return false;
+                    const txt = (b.innerText || b.textContent || '').trim();
+                    return txt === 'Agent' || txt.toLowerCase() === 'agent mode';
+                });
                 if (agentBtn) {
                     agentBtn.scrollIntoView({ block: 'center' });
                     const r = agentBtn.getBoundingClientRect();
@@ -810,6 +819,7 @@ export class GoogleFxFlowTool extends BaseTool {
         // After Agent mode is ON, click the "Expand" (expand_content) button if visible
         await this._clickExpandButton(page);
     }
+
 
     /**
      * Clicks the "Expand" (expand_content icon) button in the prompt bar if visible.
@@ -945,54 +955,73 @@ export class GoogleFxFlowTool extends BaseTool {
                 return textPresent || saveBtn;
             });
 
-            // ── STEP 2: Find & Click Settings (tune) Icon ───────────────────────
+            // ── STEP 2: Find & Click Settings Button ─────────────────────────────
             if (panelOpened) {
                 console.log(`      ✅ Agent Settings drawer is already open`);
             } else {
-                for (let attempt = 1; attempt <= 3; attempt++) {
+                for (let attempt = 1; attempt <= 5; attempt++) {
                     const coords = await page.evaluate(() => {
                         const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
-                        const isSettingsTarget = b => {
-                            if (!b) return false;
-                            const txt = (b.innerText || b.textContent || '').toLowerCase().trim();
-                            const aria = (b.getAttribute('aria-label') || '').toLowerCase();
-                            if (txt.includes('expand') || aria.includes('expand')) return false;
-                            if (txt.includes('instruction') || aria.includes('instruction')) return false;
-                            if (txt === 'arrow_forward' || aria === 'create' || aria === 'send') return false;
-                            return true;
-                        };
 
-                        const containers = Array.from(document.querySelectorAll(
-                            '.sc-c9e4708a-0, .sc-5c3af813-0, [class*="sc-c9e4708a"], [class*="sc-5c3af813"]'
-                        )).filter(c => isVisible(c) && !c.closest('.sc-e4f4e472-3'));
-                        const promptContainer = containers.length > 0 ? containers[containers.length - 1] : null;
+                        // STRATEGY 1: Top-right gear icon with aria-label="Settings" (confirmed working in new Flow UI)
+                        let btn = Array.from(document.querySelectorAll('button, [role="button"]')).find(b => {
+                            if (!isVisible(b)) return false;
+                            const aria = (b.getAttribute('aria-label') || '').toLowerCase().trim();
+                            return aria === 'settings';
+                        });
 
-                        let btn = null;
-                        if (promptContainer) {
-                            btn = Array.from(promptContainer.querySelectorAll('button'))
+                        // STRATEGY 2: tune icon text in the bottom prompt bar (old behavior)
+                        if (!btn) {
+                            const isSettingsTarget = b => {
+                                if (!b) return false;
+                                const txt = (b.innerText || b.textContent || '').toLowerCase().trim();
+                                const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+                                if (txt.includes('expand') || aria.includes('expand')) return false;
+                                if (txt.includes('instruction') || aria.includes('instruction')) return false;
+                                if (txt === 'arrow_forward' || aria === 'create' || aria === 'send') return false;
+                                return true;
+                            };
+                            btn = Array.from(document.querySelectorAll('button'))
                                 .filter(isSettingsTarget)
                                 .find(b => isVisible(b) && Array.from(b.querySelectorAll('*')).some(el => (el.textContent || '').trim() === 'tune'));
                         }
+
+                        // STRATEGY 3: sliders icon aria-label
                         if (!btn) {
-                            btn = Array.from(document.querySelectorAll('button'))
-                                .filter(isSettingsTarget)
-                                .find(b => isVisible(b) && (b.className || '').includes('sc-c4e423a0-1'));
+                            btn = Array.from(document.querySelectorAll('button, [role="button"]')).find(b => {
+                                if (!isVisible(b)) return false;
+                                const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+                                const txt = (b.innerText || b.textContent || '').toLowerCase().trim();
+                                return aria.includes('setting') || aria.includes('sliders') || aria.includes('tune') ||
+                                    txt === 'tune' || txt === 'sliders';
+                            });
+                        }
+
+                        // STRATEGY 4: Old class-name based approach (legacy fallback)
+                        if (!btn) {
+                            btn = Array.from(document.querySelectorAll('button')).find(b => {
+                                if (!isVisible(b)) return false;
+                                const cls = b.className || '';
+                                return cls.includes('sc-c4e423a0-1');
+                            });
                         }
 
                         if (btn) {
                             if (window.__highlight) window.__highlight(btn);
                             btn.scrollIntoView({ block: 'center', inline: 'nearest' });
                             const r = btn.getBoundingClientRect();
-                            return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2) };
+                            return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2), strategy: btn.getAttribute('aria-label') || btn.textContent?.trim()?.substring(0, 20) };
                         }
                         return null;
                     });
 
                     if (coords && coords.cx > 0 && coords.cy > 0) {
-                        console.log(`      ⚙️ Settings tune button clicked at [${coords.cx}, ${coords.cy}] (attempt ${attempt})`);
+                        console.log(`      ⚙️ Settings button clicked at [${coords.cx}, ${coords.cy}] (attempt ${attempt}, via: "${coords.strategy || 'unknown'}")`);
                         try { await page.mouse.click(coords.cx, coords.cy); } catch {}
+                    } else {
+                        console.warn(`      ⚠️ Settings button not found on attempt ${attempt}/5`);
                     }
-                    await page.waitForTimeout(1000);
+                    await page.waitForTimeout(1200);
 
                     panelOpened = await page.evaluate(() => {
                         const textPresent = (document.body.innerText || '').includes('Agent settings');
@@ -1012,37 +1041,125 @@ export class GoogleFxFlowTool extends BaseTool {
                 return;
             }
 
-            // ── STEP 3: Set "Confirm before generating" → Never ──────────────────
+            // ── STEP 3: ALWAYS force "Confirm before generating" → Never ─────────
+            // This is MANDATORY — without it, Flow pauses and waits for human approval on every generation.
+            // DOM: <input type="radio" class="mdc-radio__native-control" id="mat-radio-1-input"> (Never)
+            // Selected state check: input.checked === true (NOT data-state/aria-checked — those are unreliable)
+            console.log(`      🔴 [MANDATORY] Forcing "Confirm before generating" → Never...`);
             let neverConfirmed = false;
-            for (let attempt = 1; attempt <= 3; attempt++) {
-                const coords = await page.evaluate(() => {
-                    const radios = Array.from(document.querySelectorAll('button[role="radio"], [role="radio"]'));
-                    const neverRadio = radios.find(r => r.getAttribute('value') === 'AUTO_APPROVE' || (r.innerText || r.textContent || '').includes('Never'));
-                    if (neverRadio) {
-                        if (window.__highlight) window.__highlight(neverRadio);
-                        neverRadio.click();
-                        const r = neverRadio.getBoundingClientRect();
-                        return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2) };
+
+            for (let attempt = 1; attempt <= 5; attempt++) {
+                // First: check if Never is already selected
+                const isAlreadyNever = await page.evaluate(() => {
+                    const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+                    // Find the "Never" native radio input — look for the one whose sibling label text includes "Never"
+                    const allNativeRadios = Array.from(document.querySelectorAll('input[type="radio"].mdc-radio__native-control, input[type="radio"]'));
+                    for (const radio of allNativeRadios) {
+                        const label = radio.closest('label') || radio.closest('.mdc-form-field') || radio.parentElement;
+                        const labelText = (label?.innerText || label?.textContent || '').toLowerCase();
+                        if (labelText.includes('never') || labelText.includes('auto_approve')) {
+                            return radio.checked === true;
+                        }
                     }
+                    // Fallback: 2nd radio = Never (Always=first, Never=second)
+                    const radios = allNativeRadios.filter(r => isVisible(r) || true); // native radios may be hidden by CSS
+                    return radios.length >= 2 ? radios[1].checked === true : false;
+                });
+
+                if (isAlreadyNever) {
+                    console.log(`      ✅ "Never" is already selected ✓`);
+                    neverConfirmed = true;
+                    break;
+                }
+
+                // Find the Never label/element and click it (multiple strategies)
+                const clickCoords = await page.evaluate(() => {
+                    const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+
+                    // Strategy A: Find label wrapping the "Never" native radio — click the label
+                    const allLabels = Array.from(document.querySelectorAll('label.mdc-form-field, label.mat-internal-form-field, label'));
+                    const neverLabel = allLabels.find(label => {
+                        const txt = (label.innerText || label.textContent || '').toLowerCase();
+                        return txt.includes('never') && txt.length < 200; // not a huge container
+                    });
+                    if (neverLabel) {
+                        neverLabel.click();
+                        const r = neverLabel.getBoundingClientRect();
+                        return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2), via: 'label' };
+                    }
+
+                    // Strategy B: Click the native radio input itself
+                    const allNativeRadios = Array.from(document.querySelectorAll('input[type="radio"].mdc-radio__native-control, input[type="radio"]'));
+                    for (const radio of allNativeRadios) {
+                        const label = radio.closest('label') || radio.closest('.mdc-form-field') || radio.parentElement;
+                        const labelText = (label?.innerText || label?.textContent || '').toLowerCase();
+                        if (labelText.includes('never')) {
+                            radio.click();
+                            const r = radio.getBoundingClientRect();
+                            // If rect is zero (hidden), use parent label rect
+                            const rect = (r.width > 0 && r.height > 0) ? r : label?.getBoundingClientRect();
+                            return { cx: Math.round(rect.left + rect.width / 2), cy: Math.round(rect.top + rect.height / 2), via: 'native-radio' };
+                        }
+                    }
+
+                    // Strategy C: [role="radio"] elements — pick the "Never" one
+                    const roleRadios = Array.from(document.querySelectorAll('[role="radio"]'));
+                    const neverRole = roleRadios.find(r => (r.innerText || r.textContent || '').toLowerCase().includes('never'));
+                    if (neverRole) {
+                        neverRole.click();
+                        const r = neverRole.getBoundingClientRect();
+                        return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2), via: 'role-radio' };
+                    }
+
+                    // Strategy D: Any span/div with exactly "Never" text — click its parent
+                    const allSpans = Array.from(document.querySelectorAll('span, div'));
+                    const neverSpan = allSpans.find(el => {
+                        if (!isVisible(el)) return false;
+                        const txt = (el.innerText || el.textContent || '').trim();
+                        return txt === 'Never';
+                    });
+                    if (neverSpan) {
+                        const target = neverSpan.closest('label') || neverSpan.closest('[role="radio"]') || neverSpan;
+                        target.click();
+                        const r = target.getBoundingClientRect();
+                        return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2), via: 'span-text' };
+                    }
+
                     return null;
                 });
 
-                if (coords && coords.cx > 0 && coords.cy > 0) {
-                    try { await page.mouse.click(coords.cx, coords.cy); } catch {}
+                if (clickCoords && clickCoords.cx > 0 && clickCoords.cy > 0) {
+                    console.log(`      🖱️ Clicking "Never" at [${clickCoords.cx}, ${clickCoords.cy}] (attempt ${attempt}/5, via: ${clickCoords.via})`);
+                    try { await page.mouse.click(clickCoords.cx, clickCoords.cy); } catch {}
+                } else {
+                    console.warn(`      ⚠️ "Never" radio element not found on attempt ${attempt}/5`);
                 }
-                await page.waitForTimeout(500);
+                await page.waitForTimeout(600);
 
+                // Verify using .checked property — the reliable native DOM state
                 neverConfirmed = await page.evaluate(() => {
-                    const radios = Array.from(document.querySelectorAll('button[role="radio"], [role="radio"]'));
-                    const neverRadio = radios.find(r => r.getAttribute('value') === 'AUTO_APPROVE' || (r.innerText || r.textContent || '').includes('Never'));
-                    return neverRadio && (neverRadio.getAttribute('data-state') === 'checked' || neverRadio.getAttribute('aria-checked') === 'true');
+                    const allNativeRadios = Array.from(document.querySelectorAll('input[type="radio"].mdc-radio__native-control, input[type="radio"]'));
+                    for (const radio of allNativeRadios) {
+                        const label = radio.closest('label') || radio.closest('.mdc-form-field') || radio.parentElement;
+                        const labelText = (label?.innerText || label?.textContent || '').toLowerCase();
+                        if (labelText.includes('never')) return radio.checked === true;
+                    }
+                    // Fallback: 2nd radio = Never
+                    const radios = allNativeRadios;
+                    return radios.length >= 2 ? radios[1].checked === true : false;
                 });
 
                 if (neverConfirmed) {
-                    console.log(`      ✅ Set confirmation → Never (verified)`);
+                    console.log(`      ✅ "Never" confirmed selected ✓ (attempt ${attempt}/5)`);
                     break;
                 }
+                await page.waitForTimeout(400);
             }
+
+            if (!neverConfirmed) {
+                console.warn(`      ⚠️ Could not verify "Never" selection after 5 attempts — Flow may pause and ask for confirmation!`);
+            }
+
 
             // ── STEP 4: Target Section ("Video generation default") & Apply Settings ───────
             const isVideoJob = type === 'video' || type === 'avatar_video';
@@ -2109,10 +2226,11 @@ export class GoogleFxFlowTool extends BaseTool {
                 }
             }
 
-            for (let i = 0; i < 16 && !attachmentVerified; i++) {
+            for (let i = 0; i < 20 && !attachmentVerified; i++) {
                 attachmentVerified = await page.evaluate(() => {
                     const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
 
+                    // CHECK 1: A video element with blob/http src is visible anywhere (freshly uploaded media thumbnail)
                     const videos = Array.from(document.querySelectorAll('video'));
                     for (const v of videos) {
                         if (!isVisible(v)) continue;
@@ -2120,48 +2238,58 @@ export class GoogleFxFlowTool extends BaseTool {
                         if (src.startsWith('blob:') || src.startsWith('http')) return true;
                     }
 
-                    const promptBarSelectors = [
-                        '[class*="sc-5c3af813"]', '[class*="sc-c9e4708a"]',
-                        '[class*="prompt-bar"]', '[class*="input-bar"]',
-                        '[class*="prompt-input"]', '[class*="bottom-bar"]',
-                    ];
-                    for (const sel of promptBarSelectors) {
-                        const containers = Array.from(document.querySelectorAll(sel)).filter(c => isVisible(c));
-                        for (const c of containers) {
-                            const imgs = Array.from(c.querySelectorAll('img[src]'));
-                            for (const img of imgs) {
-                                if (!isVisible(img)) continue;
-                                const src = img.getAttribute('src') || '';
-                                if (!src.includes('googleusercontent') && !src.includes('lh3.google') && !src.includes('gstatic')) {
-                                    return true;
-                                }
-                            }
-                            const chips = c.querySelectorAll(
-                                '[class*="chip"], [class*="pill"], [class*="badge"], [class*="attachment"], [class*="media-tag"], [class*="seed"]'
-                            );
-                            if (chips.length > 0) return true;
-                        }
+                    // CHECK 2: "Add to Prompt" button is GONE — means media was added and panel closed
+                    const addToPromptVisible = Array.from(document.querySelectorAll('button')).some(b => {
+                        if (!isVisible(b)) return false;
+                        const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
+                        return txt === 'add to prompt' || txt.includes('add to prompt');
+                    });
+                    if (!addToPromptVisible) {
+                        // Double-check: session panel (right side) exists with some content — means attachment succeeded
+                        const rightPanelHasContent = Array.from(document.querySelectorAll('img[src]')).some(img => {
+                            if (!isVisible(img)) return false;
+                            const r = img.getBoundingClientRect();
+                            // In the right session panel (x > 55% viewport) or bottom prompt bar thumbnail
+                            return r.left > window.innerWidth * 0.55;
+                        });
+                        // Also accept if the text input area in the right panel is visible — attachment may be a chip not img
+                        const rightInputVisible = Array.from(document.querySelectorAll('[role="textbox"], [contenteditable="true"], textarea')).some(el => {
+                            if (!isVisible(el)) return false;
+                            const r = el.getBoundingClientRect();
+                            return r.left > window.innerWidth * 0.5;
+                        });
+                        if (rightPanelHasContent || rightInputVisible) return true;
                     }
 
+                    // CHECK 3: Look for image/thumbnail chips in the BOTTOM area of the right session panel (prompt input zone)
+                    // These appear as small thumbnails/chips attached to the prompt before submission
+                    const imgs = Array.from(document.querySelectorAll('img[src]')).filter(img => {
+                        if (!isVisible(img)) return false;
+                        const src = img.getAttribute('src') || '';
+                        if (src.startsWith('data:') || src === '') return false;
+                        if (src.includes('googleusercontent') || src.includes('lh3.google') || src.includes('gstatic')) return false;
+                        const r = img.getBoundingClientRect();
+                        // Must be in the right session panel area and in the lower half (prompt bar area)
+                        return r.left > window.innerWidth * 0.5 && r.top > window.innerHeight * 0.4;
+                    });
+                    if (imgs.length > 0) return true;
+
+                    // CHECK 4: Submit/Create button is enabled AND "Add to Prompt" is gone → infer attachment succeeded
                     const submitBtn = Array.from(document.querySelectorAll('button')).find(b => {
                         if (!isVisible(b)) return false;
                         const txt = (b.innerText || b.textContent || '').trim();
-                        return txt.includes('Create') || txt.includes('arrow_forward');
+                        return txt.includes('Create') || txt.includes('arrow_forward') || txt === '→';
                     });
-                    if (submitBtn && !submitBtn.disabled && submitBtn.getAttribute('aria-disabled') !== 'true') {
-                        const addToPromptVisible = Array.from(document.querySelectorAll('button')).some(b => {
-                            if (!isVisible(b)) return false;
-                            const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
-                            return txt.includes('add to prompt');
-                        });
-                        if (!addToPromptVisible) return true;
+                    if (submitBtn && !submitBtn.disabled && submitBtn.getAttribute('aria-disabled') !== 'true' && !addToPromptVisible) {
+                        return true;
                     }
 
                     return false;
                 });
 
-                if (!attachmentVerified) await page.waitForTimeout(500);
+                if (!attachmentVerified) await page.waitForTimeout(600);
             }
+
 
             if (attachmentVerified) {
                 console.log(`      ✅ Media attachment confirmed in prompt bar (round ${round})!`);
@@ -2171,8 +2299,9 @@ export class GoogleFxFlowTool extends BaseTool {
 
         if (!attachmentVerified) {
             try { if (existsSync(tmpPath)) unlinkSync(tmpPath); } catch {}
-            throw new Error(`[GoogleFX] ❌ Failed to verify media attachment in prompt bar after 3 attempts. Aborting prompt submission.`);
+            throw new Error(`[GoogleFX] ❌ Failed to verify media attachment in prompt bar after 20 checks. Aborting prompt submission.`);
         }
+
 
         // ── Final wait: ensure panel is fully closed and prompt bar is stable ──
         console.log(`      ⏳ Ensuring media panel is fully closed...`);
@@ -2569,6 +2698,7 @@ export class GoogleFxFlowTool extends BaseTool {
         let resultData = null;
         let pollCount = 0;
         let retryCount = 0;
+        let consecutiveMediaFound = 0; // safety net: if video seen N polls in a row, declare done
 
         // Apply filter ("Generated" ON, "Uploaded" OFF) once so uploaded reference media is hidden in feed
         await this._applyResultFilter(page);
@@ -2583,9 +2713,8 @@ export class GoogleFxFlowTool extends BaseTool {
                 const bodyText = (document.body && document.body.innerText) || '';
 
                 // 1. Percentage tracking (e.g., 15%, 50%, 99%)
-                // Expand selector list for modern Google Flow SVG / canvas / progressbar spinners
                 const hasLoaderForPct = Array.from(document.querySelectorAll(
-                    '[role="progressbar"], progress, [class*="spinner"], [class*="loading"], [class*="loader"], [class*="progress"], [class*="spin"], [class*="animate"], svg, canvas'
+                    '[role="progressbar"], progress, [class*="spinner"], [class*="loading"], [class*="loader"], [class*="progress-bar"], mat-progress-bar, mat-spinner'
                 )).some(el => el.offsetWidth > 0 && el.offsetHeight > 0);
 
                 const pctMatches = bodyText.match(/(\d{1,3})\s*%/g);
@@ -2618,8 +2747,10 @@ export class GoogleFxFlowTool extends BaseTool {
                 }
 
                 // 2. Active generation loaders / spinners / status text
+                // IMPORTANT: Do NOT include 'svg' or 'canvas' here — Google Flow always has SVG icons on screen
+                // which causes hasActiveSpinner to always be true even after generation completes!
                 const hasActiveSpinner = Array.from(document.querySelectorAll(
-                    '[role="progressbar"], progress, [class*="spinner"], [class*="loading"], [class*="loader"], [class*="progress"], [class*="spin"], [class*="animate"], svg, canvas'
+                    '[role="progressbar"], progress, [class*="spinner"], [class*="loading"], [class*="loader"], [class*="progress-bar"], mat-progress-bar, mat-spinner'
                 )).some(
                     el => el.offsetWidth > 0 && el.offsetHeight > 0
                 );
@@ -2639,7 +2770,8 @@ export class GoogleFxFlowTool extends BaseTool {
                 const isProfileOrUi = (src) => {
                     if (!src || src.startsWith('data:')) return true;
                     if (excludedSet.has(src)) return true;
-                    if (src.startsWith('blob:')) return true;
+                    // NOTE: Do NOT exclude blob: URLs here — Google Flow serves generated VIDEOS as blob: URLs!
+                    // blob: exclusion only applies to the uploaded reference media (handled via excludedSet).
 
                     const lowerSrc = src.toLowerCase();
                     if (
@@ -2647,13 +2779,10 @@ export class GoogleFxFlowTool extends BaseTool {
                         lowerSrc.includes('lh3.google') ||
                         lowerSrc.includes('ggpht.com') ||
                         lowerSrc.includes('profile') ||
-                        lowerSrc.includes('avatar') ||
                         lowerSrc.includes('favicon') ||
                         lowerSrc.includes('gstatic') ||
                         lowerSrc.includes('google.png') ||
-                        lowerSrc.includes('logo') ||
-                        lowerSrc.includes('user') ||
-                        lowerSrc.includes('account')
+                        lowerSrc.includes('logo')
                     ) return true;
 
                     return false;
@@ -2663,22 +2792,24 @@ export class GoogleFxFlowTool extends BaseTool {
                 let newVideoUrl = null;
                 let newImageUrl = null;
 
-                // Scan video elements
+                // Scan video elements — blob: srcs are VALID generated video results in Google Flow
                 document.querySelectorAll('video').forEach((vid) => {
-                    const src = vid.getAttribute('src') || (vid.querySelector('source') && vid.querySelector('source').getAttribute('src'));
+                    if (!vid.offsetWidth && !vid.offsetHeight) return; // skip hidden
+                    const src = vid.getAttribute('src') || vid.currentSrc ||
+                        (vid.querySelector('source') && vid.querySelector('source').getAttribute('src')) || '';
                     if (src && !isProfileOrUi(src)) {
                         newMediaUrls.push(src);
                         if (!newVideoUrl) newVideoUrl = src;
                     }
                 });
 
-                // Scan image elements
+                // Scan image elements (only large ones — not icons/UI)
                 document.querySelectorAll('img').forEach((img) => {
                     const src = img.getAttribute('src') || '';
                     if (src && !isProfileOrUi(src)) {
                         const w = img.clientWidth || img.naturalWidth || 0;
                         const h = img.clientHeight || img.naturalHeight || 0;
-                        if ((w === 0 || w >= 250) && (h === 0 || h >= 250)) {
+                        if ((w === 0 || w >= 150) && (h === 0 || h >= 150)) {
                             newMediaUrls.push(src);
                             if (!newImageUrl) newImageUrl = src;
                         }
@@ -2686,17 +2817,47 @@ export class GoogleFxFlowTool extends BaseTool {
                 });
 
                 // Detect Google's "Something went wrong" error UI
-                // PRIMARY signal: visible "Try again" button (the only reliable UI indicator)
-                // AVOID relying on bodyText — chat replay text can include error message strings
                 const hasTryAgainBtn = !!Array.from(document.querySelectorAll('button')).find(b =>
                     b.offsetWidth > 0 && (b.innerText || b.textContent || '').trim().toLowerCase() === 'try again'
                 );
-                // Secondary check: "error" label + "Something went wrong" text near the "Try again" button
-                // Only count as error if the Try Again button is actually visible
                 const isGoogleError = hasTryAgainBtn && (
                     bodyText.includes('Something went wrong') ||
                     bodyText.includes('something went wrong')
                 );
+
+                // ── KEY DETECTION: flow-video-tile custom element ──
+                // Google Flow renders completed generated videos as <flow-video-tile> web components
+                // with an <img> thumbnail — there is NO <video> element on the project page.
+                // Clicking the tile navigates to /edit/<sceneId> where the actual video plays.
+                const newVideoTiles = Array.from(document.querySelectorAll('flow-video-tile, [class*="video-tile"]')).filter(tile => {
+                    if (!tile.offsetWidth && !tile.offsetHeight) return false;
+                    const img = tile.querySelector('img[src]');
+                    if (!img) return false;
+                    const src = img.getAttribute('src') || '';
+                    // Must be a real content URL (not excluded/profile)
+                    return src && !src.startsWith('data:') && !excludedSet.has(src) &&
+                        !src.includes('googleusercontent.com') && !src.includes('gstatic') &&
+                        !src.includes('lh3.google');
+                });
+
+                // Also detect the session chat panel video result: div[aria-label="Open video in editor"]
+                const chatVideoContainers = Array.from(document.querySelectorAll('[aria-label="Open video in editor"], .video-container.clickable')).filter(el => {
+                    if (!el.offsetWidth && !el.offsetHeight) return false;
+                    const img = el.querySelector('img[src]');
+                    if (!img) return false;
+                    const src = img.getAttribute('src') || '';
+                    return src && !src.startsWith('data:') && !excludedSet.has(src);
+                });
+
+                // Collect thumbnail URLs from video tiles as the result URL
+                const videoTileUrl = newVideoTiles.length > 0
+                    ? (newVideoTiles[0].querySelector('img[src]')?.getAttribute('src') || null)
+                    : (chatVideoContainers.length > 0
+                        ? (chatVideoContainers[0].querySelector('img[src]')?.getAttribute('src') || null)
+                        : null);
+
+                if (videoTileUrl && !newVideoUrl) newVideoUrl = videoTileUrl;
+                if (videoTileUrl && !newMediaUrls.includes(videoTileUrl)) newMediaUrls.push(videoTileUrl);
 
                 return {
                     currentPct,
@@ -2704,8 +2865,9 @@ export class GoogleFxFlowTool extends BaseTool {
                     hasActiveSpinner,
                     isGeneratingText,
                     mediaUrls: Array.from(new Set(newMediaUrls)),
-                    videoUrl: newVideoUrl,
-                    imageUrl: newImageUrl,
+                    videoUrl: newVideoUrl,      // blob: URL from <video> OR tile thumbnail URL
+                    imageUrl: newImageUrl,      // standalone <img> URL
+                    videoTileCount: newVideoTiles.length + chatVideoContainers.length,  // flow-video-tile count
                     text: bodyText.substring(0, 3000),
                     isCancelled: bodyText.includes('Response was cancelled') || bodyText.includes('response was cancelled'),
                     isGoogleError,
@@ -2847,20 +3009,43 @@ export class GoogleFxFlowTool extends BaseTool {
                 }
             }
 
-            // CRITICAL GATE: ONLY MARK COMPLETED WHEN A NEW GENERATED ASSET IS FOUND (TOTAL ASSETS > 0)!
+            // CRITICAL GATE: COMPLETED when a new generated asset appears
             const isVideoType = type === 'video' || type === 'avatar_video';
-            const targetAsset = isVideoType ? liveState.videoUrl : (liveState.imageUrl || liveState.videoUrl);
+            // For VIDEO type: Google Flow shows ONLY <flow-video-tile> (with img thumbnail) — no <video> element.
+            // So targetAsset = videoUrl (which now includes tile thumbnail) OR imageUrl as fallback.
+            const targetAsset = liveState.videoUrl || liveState.imageUrl || null;
 
-            if (targetAsset && liveState.mediaUrls.length > 0 && !liveState.hasActiveSpinner) {
-                console.log(`      ✨ GENERATION COMPLETED! Found ${liveState.mediaUrls.length} new asset(s) in ${elapsedSec}s.`);
-                console.log(`      🔗 New Generated Asset URL: ${targetAsset}`);
+            // Always update activity time when any new media is found (even if spinner is still visible)
+            if (liveState.mediaUrls.length > 0 || liveState.videoTileCount > 0) {
+                lastActivityTime = Date.now();
+                consecutiveMediaFound++;
+            } else {
+                consecutiveMediaFound = 0;
+            }
+
+            const spinnerGone = !liveState.hasActiveSpinner;
+            const hadHighProgress = lastProgressPct >= 90;
+            const videoFoundAfterProgress = targetAsset && hadHighProgress;
+            // Safety net: if video found 3+ consecutive polls but spinner still detected (false positive)
+            const persistentMediaFound = (targetAsset || liveState.videoTileCount > 0) && consecutiveMediaFound >= 3;
+
+            if ((targetAsset || liveState.videoTileCount > 0) && (liveState.mediaUrls.length > 0 || liveState.videoTileCount > 0) && (spinnerGone || videoFoundAfterProgress || persistentMediaFound)) {
+                const reason = spinnerGone ? 'spinner gone' : hadHighProgress ? 'progress>=90%' : `seen ${consecutiveMediaFound} polls`;
+                const bestUrl = targetAsset || `flow-video-tile detected (${liveState.videoTileCount} tile(s))`;
+                console.log(`      ✨ GENERATION COMPLETED! ${liveState.videoTileCount > 0 ? liveState.videoTileCount + ' video tile(s)' : liveState.mediaUrls.length + ' asset(s)'} in ${elapsedSec}s. [${reason}]`);
+                console.log(`      🔗 Result URL: ${bestUrl}`);
                 resultData = {
-                    videoUrl: isVideoType ? liveState.videoUrl : null,
+                    videoUrl: isVideoType ? (liveState.videoUrl || liveState.imageUrl) : null,
                     imageUrl: type === 'image' ? liveState.imageUrl : null,
                     mediaUrls: liveState.mediaUrls,
+                    videoTileCount: liveState.videoTileCount,
                     text: liveState.text,
                 };
                 break;
+            }
+
+            if (liveState.mediaUrls.length > 0) {
+                console.log(`      🎥 Media assets found (${liveState.mediaUrls.length}) — waiting for spinner to clear or ${3 - consecutiveMediaFound} more polls... [poll ${consecutiveMediaFound}/3]`);
             }
 
             if (page.isClosed()) break;
