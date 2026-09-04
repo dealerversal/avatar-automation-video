@@ -392,24 +392,53 @@ export class GoogleFxFlowTool extends BaseTool {
             console.log(`\n[3b/7] 🤖 Enabling Agent mode...`);
             await this._enableAgentMode(page);
 
-            // 4. Add account Avatar to prompt
-            if (effectiveAvatarName) {
-                this._lastAvatarName = effectiveAvatarName; // store for error retries
-                // Ensure session drawer is open — it may have closed after previous UI interactions
-                console.log(`\n[4/7] 🔲 Ensuring session drawer is open before avatar selection...`);
-                await this._clickExpandButton(page);
-                await page.waitForTimeout(500);
-                console.log(`      👤 [STEP 1/2] Selecting Avatar "${effectiveAvatarName}" and adding to prompt...`);
-                await this._addAvatarToPrompt(page, effectiveAvatarName);
-            }
-
-            // 5. Upload reference image/media to prompt
+            // 4. Add account Avatar to prompt + 5. Upload media — with internal retry (max 2 retries)
             let uploadedMediaUrls = [];
-            if (effectiveMediaUrl) {
-                this._lastMediaUrl = effectiveMediaUrl; // store for error retries
-                console.log(`\n[5/7] 🖼️ [STEP 2/2] Uploading reference media from URL, waiting for upload to finish...`);
-                uploadedMediaUrls = await this._uploadMediaFromUrl(page, effectiveMediaUrl, itemId);
-                console.log(`      🔒 Uploaded media URLs captured for exclusion: ${uploadedMediaUrls.length}`);
+            const MAX_UPLOAD_RETRIES = 2;
+
+            for (let uploadAttempt = 1; uploadAttempt <= MAX_UPLOAD_RETRIES + 1; uploadAttempt++) {
+                try {
+                    if (uploadAttempt > 1) {
+                        console.log(`\n[RETRY ${uploadAttempt - 1}/${MAX_UPLOAD_RETRIES}] 🔄 Re-running avatar + upload steps after failure...`);
+                        // Close any open panels/dialogs before retry
+                        try { await page.keyboard.press('Escape'); } catch {}
+                        await page.waitForTimeout(2000);
+                        // Re-ensure drawer is open
+                        await this._clickExpandButton(page);
+                        await page.waitForTimeout(800);
+                    }
+
+                    // 4. Add account Avatar to prompt
+                    if (effectiveAvatarName) {
+                        this._lastAvatarName = effectiveAvatarName;
+                        console.log(`\n[4/7] 🔲 Ensuring session drawer is open before avatar selection... (attempt ${uploadAttempt})`);
+                        await this._clickExpandButton(page);
+                        await page.waitForTimeout(500);
+                        console.log(`      👤 [STEP 1/2] Selecting Avatar "${effectiveAvatarName}" and adding to prompt...`);
+                        await this._addAvatarToPrompt(page, effectiveAvatarName);
+                    }
+
+                    // 5. Upload reference image/media to prompt
+                    if (effectiveMediaUrl) {
+                        this._lastMediaUrl = effectiveMediaUrl;
+                        console.log(`\n[5/7] 🖼️ [STEP 2/2] Uploading reference media from URL... (attempt ${uploadAttempt}/${MAX_UPLOAD_RETRIES + 1})`);
+                        uploadedMediaUrls = await this._uploadMediaFromUrl(page, effectiveMediaUrl, itemId);
+                        console.log(`      🔒 Uploaded media URLs captured for exclusion: ${uploadedMediaUrls.length}`);
+                    }
+
+                    // Success — break out of retry loop
+                    break;
+
+                } catch (uploadErr) {
+                    const isLastAttempt = uploadAttempt > MAX_UPLOAD_RETRIES;
+                    if (isLastAttempt) {
+                        console.error(`      ❌ Upload/avatar failed after ${MAX_UPLOAD_RETRIES} retries: ${uploadErr.message}`);
+                        throw uploadErr; // Let queue-level retry handle it
+                    }
+                    console.warn(`      ⚠️ Upload/avatar attempt ${uploadAttempt} failed: ${uploadErr.message}`);
+                    console.log(`      ⏳ Waiting 3s before retry ${uploadAttempt + 1}/${MAX_UPLOAD_RETRIES + 1}...`);
+                    await page.waitForTimeout(3000);
+                }
             }
 
             // 6. Open Agent Settings → configure (aspect ratio, model, duration, Never) → Save
@@ -2220,10 +2249,13 @@ export class GoogleFxFlowTool extends BaseTool {
         // ── CRITICAL: Verify attachment actually appeared in prompt bar ──────
         console.log(`      🔍 Waiting for media attachment to appear in the prompt bar...`);
         let attachmentVerified = false;
+        const MAX_ATTACH_ROUNDS = 5;
 
-        for (let round = 1; round <= 3 && !attachmentVerified; round++) {
+        for (let round = 1; round <= MAX_ATTACH_ROUNDS && !attachmentVerified; round++) {
             if (round > 1) {
-                console.log(`      🔄 Round ${round}: Re-trying "Add to Prompt" click...`);
+                const waitSec = round <= 3 ? 1.5 : 2.5;
+                console.log(`      🔄 Round ${round}/${MAX_ATTACH_ROUNDS}: Re-trying "Add to Prompt" click (${waitSec}s wait)...`);
+                await page.waitForTimeout(waitSec * 1000);
                 const retryCoords = await page.evaluate(() => {
                     const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
                     const btn = Array.from(document.querySelectorAll('button')).find(b => {
@@ -2240,6 +2272,9 @@ export class GoogleFxFlowTool extends BaseTool {
                 if (retryCoords) {
                     await page.mouse.click(retryCoords.cx, retryCoords.cy);
                     await page.waitForTimeout(1500);
+                } else {
+                    // No "Add to Prompt" button visible — may already be attached
+                    console.log(`      ℹ️ "Add to Prompt" not found in round ${round} — checking if already attached...`);
                 }
             }
 
@@ -2266,10 +2301,8 @@ export class GoogleFxFlowTool extends BaseTool {
                         const rightPanelHasContent = Array.from(document.querySelectorAll('img[src]')).some(img => {
                             if (!isVisible(img)) return false;
                             const r = img.getBoundingClientRect();
-                            // In the right session panel (x > 55% viewport) or bottom prompt bar thumbnail
                             return r.left > window.innerWidth * 0.55;
                         });
-                        // Also accept if the text input area in the right panel is visible — attachment may be a chip not img
                         const rightInputVisible = Array.from(document.querySelectorAll('[role="textbox"], [contenteditable="true"], textarea')).some(el => {
                             if (!isVisible(el)) return false;
                             const r = el.getBoundingClientRect();
@@ -2278,15 +2311,13 @@ export class GoogleFxFlowTool extends BaseTool {
                         if (rightPanelHasContent || rightInputVisible) return true;
                     }
 
-                    // CHECK 3: Look for image/thumbnail chips in the BOTTOM area of the right session panel (prompt input zone)
-                    // These appear as small thumbnails/chips attached to the prompt before submission
+                    // CHECK 3: Look for image/thumbnail chips in the bottom-right area (prompt input zone)
                     const imgs = Array.from(document.querySelectorAll('img[src]')).filter(img => {
                         if (!isVisible(img)) return false;
                         const src = img.getAttribute('src') || '';
                         if (src.startsWith('data:') || src === '') return false;
                         if (src.includes('googleusercontent') || src.includes('lh3.google') || src.includes('gstatic')) return false;
                         const r = img.getBoundingClientRect();
-                        // Must be in the right session panel area and in the lower half (prompt bar area)
                         return r.left > window.innerWidth * 0.5 && r.top > window.innerHeight * 0.4;
                     });
                     if (imgs.length > 0) return true;
@@ -2307,16 +2338,16 @@ export class GoogleFxFlowTool extends BaseTool {
                 if (!attachmentVerified) await page.waitForTimeout(600);
             }
 
-
             if (attachmentVerified) {
-                console.log(`      ✅ Media attachment confirmed in prompt bar (round ${round})!`);
+                console.log(`      ✅ Media attachment confirmed in prompt bar (round ${round}/${MAX_ATTACH_ROUNDS})!`);
                 break;
             }
+            console.log(`      ⏳ Attachment not yet visible after round ${round}/${MAX_ATTACH_ROUNDS}...`);
         }
 
         if (!attachmentVerified) {
             try { if (existsSync(tmpPath)) unlinkSync(tmpPath); } catch {}
-            throw new Error(`[GoogleFX] ❌ Failed to verify media attachment in prompt bar after 20 checks. Aborting prompt submission.`);
+            throw new Error(`[GoogleFX] ❌ Failed to verify media attachment in prompt bar after ${MAX_ATTACH_ROUNDS} rounds. Aborting prompt submission.`);
         }
 
 
@@ -2866,14 +2897,14 @@ export class GoogleFxFlowTool extends BaseTool {
                     return src && !src.startsWith('data:') && !excludedSet.has(src);
                 });
 
-                // Collect thumbnail URLs from video tiles as the result URL
+                // Collect thumbnail URLs from video tiles as the preview thumbnail
                 const videoTileUrl = newVideoTiles.length > 0
                     ? (newVideoTiles[0].querySelector('img[src]')?.getAttribute('src') || null)
                     : (chatVideoContainers.length > 0
                         ? (chatVideoContainers[0].querySelector('img[src]')?.getAttribute('src') || null)
                         : null);
 
-                if (videoTileUrl && !newVideoUrl) newVideoUrl = videoTileUrl;
+                // Note: Keep newVideoUrl strictly for real <video> sources so video jobs never return thumbnails
                 if (videoTileUrl && !newMediaUrls.includes(videoTileUrl)) newMediaUrls.push(videoTileUrl);
 
                 return {
@@ -2882,8 +2913,9 @@ export class GoogleFxFlowTool extends BaseTool {
                     hasActiveSpinner,
                     isGeneratingText,
                     mediaUrls: Array.from(new Set(newMediaUrls)),
-                    videoUrl: newVideoUrl,      // blob: URL from <video> OR tile thumbnail URL
-                    imageUrl: newImageUrl,      // standalone <img> URL
+                    videoUrl: newVideoUrl,      // blob: or http: URL from <video> if mounted
+                    imageUrl: newImageUrl || videoTileUrl,      // standalone <img> URL or tile thumbnail
+                    thumbnailUrl: videoTileUrl,
                     videoTileCount: newVideoTiles.length + chatVideoContainers.length,  // flow-video-tile count
                     text: bodyText.substring(0, 3000),
                     isCancelled: bodyText.includes('Response was cancelled') || bodyText.includes('response was cancelled'),
@@ -3052,8 +3084,9 @@ export class GoogleFxFlowTool extends BaseTool {
                 console.log(`      ✨ GENERATION COMPLETED! ${liveState.videoTileCount > 0 ? liveState.videoTileCount + ' video tile(s)' : liveState.mediaUrls.length + ' asset(s)'} in ${elapsedSec}s. [${reason}]`);
                 console.log(`      🔗 Result URL: ${bestUrl}`);
                 resultData = {
-                    videoUrl: isVideoType ? (liveState.videoUrl || liveState.imageUrl) : null,
-                    imageUrl: type === 'image' ? liveState.imageUrl : null,
+                    videoUrl: isVideoType ? (liveState.videoUrl || null) : null,
+                    imageUrl: type === 'image' ? (liveState.imageUrl || liveState.thumbnailUrl) : null,
+                    thumbnailUrl: liveState.thumbnailUrl || null,
                     mediaUrls: liveState.mediaUrls,
                     videoTileCount: liveState.videoTileCount,
                     text: liveState.text,
@@ -3069,7 +3102,7 @@ export class GoogleFxFlowTool extends BaseTool {
             await page.waitForTimeout(5000);
         }
 
-        if (!resultData || (!resultData.videoUrl && !resultData.imageUrl && (!resultData.mediaUrls || resultData.mediaUrls.length === 0))) {
+        if (!resultData || (!resultData.videoUrl && !resultData.imageUrl && (!resultData.mediaUrls || resultData.mediaUrls.length === 0) && (!resultData.videoTileCount || resultData.videoTileCount === 0))) {
             throw new Error(`[GoogleFX] ❌ Generation failed or timed out — Total Assets was 0 (No new generated video/image URL detected in DOM).`);
         }
 
@@ -3090,143 +3123,438 @@ export class GoogleFxFlowTool extends BaseTool {
             resultData.mediaUrls = (resultData.mediaUrls || []).map(toAbs);
         }
 
-        // ─── Find Download Button by hovering over generated media ───────────
+        // ─── Download Generated Asset (Video or Image) ─────────────────────
         try {
             const downloadDir = path.join(process.cwd(), 'downloads');
             if (!existsSync(downloadDir)) mkdirSync(downloadDir, { recursive: true });
 
             let downloaded = false;
+            const isVideoType = type === 'video' || type === 'avatar_video';
 
-            // Step 1: Find generated media cards
-            const mediaCards = await page.evaluate(() => {
-                const results = [];
-                const isUiOrProfile = (src) => {
-                    if (!src || src.startsWith('data:')) return true;
-                    const s = src.toLowerCase();
-                    return s.includes('googleusercontent.com') || s.includes('lh3.google') ||
-                           s.includes('gstatic') || s.includes('favicon') || s.includes('avatar') ||
-                           s.includes('logo');
-                };
-                document.querySelectorAll('video, img').forEach((el, idx) => {
-                    const src = el.getAttribute('src') || '';
-                    if (isUiOrProfile(src)) return;
-                    const rect = el.getBoundingClientRect();
-                    if (rect.width < 100 || rect.height < 100 || rect.top < 80) return;
-                    results.push({
-                        idx,
-                        tag: el.tagName.toLowerCase(),
-                        src,
-                        cx: Math.round(rect.left + rect.width / 2),
-                        cy: Math.round(rect.top + rect.height / 2),
-                        top: Math.round(rect.top),
-                    });
-                });
-                return results;
-            });
+            if (isVideoType) {
+                console.log(`      🎬 Starting multi-layer video download workflow...`);
 
-            console.log(`      📦 Found ${mediaCards.length} generated media card(s) to attempt download`);
-
-            // Step 2: Hover over media cards & click download button if present
-            for (const card of mediaCards) {
-                if (downloaded) break;
+                // ─────────────────────────────────────────────────────────────
+                // LAYER 1: Hover over video tile to activate playback & extract video blob/src
+                // (In Google Flow UI, hovering on the tile starts live video playback)
+                // ─────────────────────────────────────────────────────────────
                 try {
-                    console.log(`      🖱️ Hovering over ${card.tag} at (${card.cx}, ${card.cy})...`);
-                    await page.mouse.move(card.cx, card.cy);
-                    await page.waitForTimeout(800);
+                    const tileBox = await page.evaluate(() => {
+                        const tile = document.querySelector('flow-video-tile, [class*="video-tile"], [aria-label="Open video in editor"], .video-container');
+                        if (!tile) return null;
+                        const r = tile.getBoundingClientRect();
+                        return { x: r.left + r.width / 2, y: r.top + r.height / 2, width: r.width, height: r.height };
+                    });
 
-                    const DOWNLOAD_TEXTS = ['download_2', 'file_download', 'download', 'save', 'save_alt'];
-                    const allBtns = await page.$$('button, a, [role="button"]');
-                    let dlBtn = null;
+                    if (tileBox) {
+                        console.log(`      🖱️ Layer 1: Hovering over video tile at (${Math.round(tileBox.x)}, ${Math.round(tileBox.y)})...`);
+                        await page.mouse.move(tileBox.x, tileBox.y);
+                        await page.waitForTimeout(1500); // Wait for UI hover state to trigger <video> playback
 
-                    for (const btn of allBtns) {
-                        try {
-                            if (!(await btn.isVisible())) continue;
-                            const txt = (await btn.innerText()).trim().toLowerCase();
-                            const aria = (await btn.getAttribute('aria-label') || '').toLowerCase();
-                            const cls = (await btn.getAttribute('class') || '').toLowerCase();
+                        // Check if a <video> element mounted inside the tile
+                        const videoData = await page.evaluate(() => {
+                            const v = document.querySelector('flow-video-tile video, [class*="video-tile"] video, video');
+                            if (!v) return null;
+                            const src = v.getAttribute('src') || v.currentSrc || v.src || (v.querySelector('source') && v.querySelector('source').getAttribute('src')) || '';
+                            return {
+                                src,
+                                isBlob: src.startsWith('blob:'),
+                                isHttp: src.startsWith('http'),
+                            };
+                        });
 
-                            if (
-                                DOWNLOAD_TEXTS.some(d => txt === d || txt.includes(d)) ||
-                                aria.includes('download') || aria.includes('save') ||
-                                cls.includes('download') || cls.includes('save')
-                            ) {
-                                dlBtn = btn;
-                                console.log(`      📥 Found download btn: text="${txt.substring(0,30)}" aria="${aria.substring(0,30)}"`);
-                                break;
+                        if (videoData && videoData.src) {
+                            console.log(`      🎥 Detected mounted <video> on hover: src="${videoData.src.substring(0, 80)}" (blob=${videoData.isBlob})`);
+
+                            if (videoData.isBlob) {
+                                console.log(`      ⚡ Extracting video blob data from browser memory...`);
+                                const base64Data = await page.evaluate(async (blobUrl) => {
+                                    try {
+                                        const res = await fetch(blobUrl);
+                                        const blob = await res.blob();
+                                        return new Promise((resolve, reject) => {
+                                            const reader = new FileReader();
+                                            reader.onloadend = () => resolve(reader.result);
+                                            reader.onerror = reject;
+                                            reader.readAsDataURL(blob);
+                                        });
+                                    } catch (e) {
+                                        return null;
+                                    }
+                                }, videoData.src);
+
+                                if (base64Data && base64Data.startsWith('data:')) {
+                                    const base64Str = base64Data.split(',')[1];
+                                    const buffer = Buffer.from(base64Str, 'base64');
+                                    if (buffer.length > 50000) {
+                                        const filename = `flow_video_${Date.now()}.mp4`;
+                                        const localPath = path.join(downloadDir, filename);
+                                        writeFileSync(localPath, buffer);
+                                        const localUrl = `http://localhost:${config.port || 5001}/downloads/${filename}`;
+                                        console.log(`      💾 ✅ Video extracted from blob: ${localPath} (${Math.round(buffer.length / 1024)}KB)`);
+                                        resultData.downloadPath = localPath;
+                                        resultData.downloadUrl = localUrl;
+                                        resultData.videoUrl = localUrl;
+                                        resultData.filename = filename;
+                                        downloaded = true;
+                                    }
+                                }
+                            } else if (videoData.isHttp && !videoData.src.includes('googleusercontent.com') && !videoData.src.includes('gstatic')) {
+                                try {
+                                    const response = await page.request.get(videoData.src);
+                                    if (response.ok()) {
+                                        const buffer = await response.body();
+                                        if (buffer.length > 50000) {
+                                            const filename = `flow_video_${Date.now()}.mp4`;
+                                            const localPath = path.join(downloadDir, filename);
+                                            writeFileSync(localPath, buffer);
+                                            const localUrl = `http://localhost:${config.port || 5001}/downloads/${filename}`;
+                                            console.log(`      💾 ✅ Video saved from HTTP src: ${localPath} (${Math.round(buffer.length / 1024)}KB)`);
+                                            resultData.downloadPath = localPath;
+                                            resultData.downloadUrl = localUrl;
+                                            resultData.videoUrl = localUrl;
+                                            resultData.filename = filename;
+                                            downloaded = true;
+                                        }
+                                    }
+                                } catch (httpErr) {
+                                    console.warn(`      ⚠️ HTTP video fetch error: ${httpErr.message}`);
+                                }
                             }
-                        } catch {}
+                        }
                     }
+                } catch (hoverErr) {
+                    console.warn(`      ⚠️ Layer 1 hover/blob video extraction warning: ${hoverErr.message}`);
+                }
 
-                    if (!dlBtn) {
-                        const menuBtns = await page.$$('button');
-                        for (const btn of menuBtns) {
+                // ─────────────────────────────────────────────────────────────
+                // LAYER 2: 3-dot Menu (⋮) -> Download -> 720p (Original size)
+                // ─────────────────────────────────────────────────────────────
+                if (!downloaded) {
+                    try {
+                        console.log(`      🔍 Layer 2: Attempting download via video tile 3-dot (⋮) menu...`);
+
+                        // Ensure mouse is hovering over the video tile so the top-right icons appear
+                        const tileCoords = await page.evaluate(() => {
+                            const tile = document.querySelector('flow-video-tile, [class*="video-tile"], [aria-label="Open video in editor"], .video-container');
+                            if (!tile) return null;
+                            const r = tile.getBoundingClientRect();
+                            return {
+                                cx: r.left + r.width / 2,
+                                cy: r.top + r.height / 2,
+                                trX: r.right - 25,
+                                trY: r.top + 25,
+                            };
+                        });
+
+                        if (tileCoords) {
+                            await page.mouse.move(tileCoords.cx, tileCoords.cy);
+                            await page.waitForTimeout(600);
+                            await page.mouse.move(tileCoords.trX, tileCoords.trY);
+                            await page.waitForTimeout(400);
+                        }
+
+                        // Find the 3-dot button in the top-right area of the video tile
+                        const menuBtnClicked = await page.evaluate(() => {
+                            const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
+                            const tile = document.querySelector('flow-video-tile, [class*="video-tile"], [aria-label="Open video in editor"], .video-container');
+                            const tBox = tile ? tile.getBoundingClientRect() : null;
+
+                            const btn = buttons.find(b => {
+                                if (!b.offsetWidth) return false;
+                                const r = b.getBoundingClientRect();
+                                if (tBox && (r.left < tBox.left || r.right > tBox.right + 20 || r.top < tBox.top - 10 || r.bottom > tBox.bottom)) {
+                                    return false;
+                                }
+                                const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
+                                const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+                                return txt === 'more_vert' || txt === 'more_horiz' || txt === '⋮' ||
+                                    aria.includes('more') || aria.includes('menu');
+                            }) || buttons.find(b => {
+                                if (!b.offsetWidth) return false;
+                                const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
+                                return txt === 'more_vert' || txt === '⋮';
+                            });
+
+                            if (btn) {
+                                btn.click();
+                                return true;
+                            }
+                            return false;
+                        });
+
+                        if (menuBtnClicked) {
+                            console.log(`      🖱️ Clicked 3-dot menu button. Waiting for dropdown...`);
+                            await page.waitForTimeout(700);
+
+                            // Find and hover/click the "Download" item in the menu
+                            const dlClicked = await page.evaluate(() => {
+                                const allItems = Array.from(document.querySelectorAll('[role="menuitem"], [role="option"], button, li, div'));
+                                const dlItem = allItems.find(el => {
+                                    if (!el.offsetWidth) return false;
+                                    const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
+                                    return txt.startsWith('download') || txt === 'download';
+                                });
+                                if (dlItem) {
+                                    const r = dlItem.getBoundingClientRect();
+                                    dlItem.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+                                    dlItem.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+                                    dlItem.click();
+                                    return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+                                }
+                                return null;
+                            });
+
+                            if (dlClicked) {
+                                console.log(`      🖱️ Hovered/clicked "Download" menu item at (${Math.round(dlClicked.x)}, ${Math.round(dlClicked.y)})...`);
+                                await page.mouse.move(dlClicked.x, dlClicked.y);
+                                await page.waitForTimeout(600);
+
+                                // Find "720p (Original size)" or "Original size" submenu item
+                                const subItem720 = await page.evaluateHandle(() => {
+                                    const items = Array.from(document.querySelectorAll('[role="menuitem"], [role="option"], button, li, div, span'));
+                                    return items.find(el => {
+                                        if (!el.offsetWidth) return false;
+                                        const txt = (el.innerText || el.textContent || '').trim();
+                                        return txt.includes('720p') || txt.includes('Original size');
+                                    }) || null;
+                                });
+
+                                if (subItem720 && subItem720.asElement()) {
+                                    console.log(`      📥 Found "720p (Original size)" option! Triggering browser download event...`);
+                                    const filename = `flow_video_${Date.now()}.mp4`;
+                                    const localPath = path.join(downloadDir, filename);
+
+                                    const [download] = await Promise.all([
+                                        page.waitForEvent('download', { timeout: 25000 }).catch(() => null),
+                                        subItem720.asElement().click(),
+                                    ]);
+
+                                    if (download) {
+                                        await download.saveAs(localPath);
+                                        const localUrl = `http://localhost:${config.port || 5001}/downloads/${filename}`;
+                                        console.log(`      💾 ✅ Video saved via 3-dot menu 720p: ${localPath}`);
+                                        resultData.downloadPath = localPath;
+                                        resultData.downloadUrl = localUrl;
+                                        resultData.videoUrl = localUrl;
+                                        resultData.filename = filename;
+                                        downloaded = true;
+                                    } else {
+                                        console.warn(`      ⚠️ Download event not fired after clicking 720p`);
+                                    }
+                                } else {
+                                    console.warn(`      ⚠️ "720p (Original size)" submenu option not found in DOM`);
+                                }
+                            } else {
+                                console.warn(`      ⚠️ "Download" option not found in 3-dot menu`);
+                            }
+                        } else {
+                            console.warn(`      ⚠️ 3-dot menu button not found on video tile`);
+                        }
+                    } catch (menuErr) {
+                        console.warn(`      ⚠️ Layer 2 3-dot menu download error: ${menuErr.message}`);
+                    }
+                }
+
+                // ─────────────────────────────────────────────────────────────
+                // LAYER 3: Click Play/Video Icon (▶) -> Open Editor/Player -> Toolbar Download
+                // ─────────────────────────────────────────────────────────────
+                if (!downloaded) {
+                    try {
+                        console.log(`      🎬 Layer 3: Clicking play icon / video tile to open player & download...`);
+                        const tileClicked = await page.evaluate(() => {
+                            const btns = Array.from(document.querySelectorAll('button, [role="button"]'));
+                            const tile = document.querySelector('flow-video-tile, [class*="video-tile"], [aria-label="Open video in editor"], .video-container');
+                            if (!tile) return false;
+                            const tBox = tile.getBoundingClientRect();
+                            const playBtn = btns.find(b => {
+                                if (!b.offsetWidth) return false;
+                                const r = b.getBoundingClientRect();
+                                const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
+                                const isPlay = txt.includes('play') || (b.querySelector('svg, [class*="icon"]') && r.left < tBox.left + 100);
+                                return isPlay && r.top >= tBox.top && r.top <= tBox.top + 100;
+                            });
+                            if (playBtn) {
+                                playBtn.click();
+                                return true;
+                            }
+                            tile.click();
+                            return true;
+                        });
+
+                        if (tileClicked) {
+                            console.log(`      🖱️ Opened player/editor view. Waiting 3s for player to render...`);
+                            await page.waitForTimeout(3000);
+
+                            // Check for <video> element in player view
+                            const playerVideoSrc = await page.evaluate(() => {
+                                const v = document.querySelector('video');
+                                return v ? (v.getAttribute('src') || v.currentSrc || v.src || null) : null;
+                            });
+
+                            if (playerVideoSrc && playerVideoSrc.startsWith('blob:')) {
+                                console.log(`      ⚡ Extracting blob video data from editor player: ${playerVideoSrc}`);
+                                const base64Data = await page.evaluate(async (blobUrl) => {
+                                    try {
+                                        const res = await fetch(blobUrl);
+                                        const blob = await res.blob();
+                                        return new Promise((resolve) => {
+                                            const reader = new FileReader();
+                                            reader.onloadend = () => resolve(reader.result);
+                                            reader.readAsDataURL(blob);
+                                        });
+                                    } catch (e) {
+                                        return null;
+                                    }
+                                }, playerVideoSrc);
+
+                                if (base64Data && base64Data.startsWith('data:')) {
+                                    const buffer = Buffer.from(base64Data.split(',')[1], 'base64');
+                                    if (buffer.length > 50000) {
+                                        const filename = `flow_video_${Date.now()}.mp4`;
+                                        const localPath = path.join(downloadDir, filename);
+                                        writeFileSync(localPath, buffer);
+                                        const localUrl = `http://localhost:${config.port || 5001}/downloads/${filename}`;
+                                        console.log(`      💾 ✅ Video saved from editor blob: ${localPath} (${Math.round(buffer.length / 1024)}KB)`);
+                                        resultData.downloadPath = localPath;
+                                        resultData.downloadUrl = localUrl;
+                                        resultData.videoUrl = localUrl;
+                                        resultData.filename = filename;
+                                        downloaded = true;
+                                    }
+                                }
+                            }
+
+                            if (!downloaded) {
+                                // Try toolbar download button in editor
+                                const editorDlBtn = await page.evaluateHandle(() => {
+                                    const btns = Array.from(document.querySelectorAll('button, [role="button"], a'));
+                                    return btns.find(b => {
+                                        if (!b.offsetWidth) return false;
+                                        const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
+                                        const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+                                        return txt.includes('download') || txt.includes('file_download') ||
+                                            aria.includes('download') || aria.includes('export');
+                                    }) || null;
+                                });
+
+                                if (editorDlBtn && editorDlBtn.asElement()) {
+                                    console.log(`      📥 Clicking toolbar download/export button in editor...`);
+                                    const filename = `flow_video_${Date.now()}.mp4`;
+                                    const localPath = path.join(downloadDir, filename);
+
+                                    const [download] = await Promise.all([
+                                        page.waitForEvent('download', { timeout: 25000 }).catch(() => null),
+                                        editorDlBtn.asElement().click(),
+                                    ]);
+
+                                    if (download) {
+                                        await download.saveAs(localPath);
+                                        const localUrl = `http://localhost:${config.port || 5001}/downloads/${filename}`;
+                                        console.log(`      💾 ✅ Video saved from editor toolbar: ${localPath}`);
+                                        resultData.downloadPath = localPath;
+                                        resultData.downloadUrl = localUrl;
+                                        resultData.videoUrl = localUrl;
+                                        resultData.filename = filename;
+                                        downloaded = true;
+                                    }
+                                }
+                            }
+                        }
+                    } catch (editorErr) {
+                        console.warn(`      ⚠️ Layer 3 editor download error: ${editorErr.message}`);
+                    }
+                }
+            } else {
+                // ─────────────────────────────────────────────────────────────
+                // IMAGE DOWNLOAD WORKFLOW
+                // ─────────────────────────────────────────────────────────────
+                console.log(`      🖼️ Starting image download workflow...`);
+                const mediaCards = await page.evaluate(() => {
+                    const results = [];
+                    const isUiOrProfile = (src) => {
+                        if (!src || src.startsWith('data:')) return true;
+                        const s = src.toLowerCase();
+                        return s.includes('googleusercontent.com') || s.includes('lh3.google') ||
+                               s.includes('gstatic') || s.includes('favicon') || s.includes('avatar') ||
+                               s.includes('logo');
+                    };
+                    document.querySelectorAll('img').forEach((el, idx) => {
+                        const src = el.getAttribute('src') || '';
+                        if (isUiOrProfile(src)) return;
+                        const rect = el.getBoundingClientRect();
+                        if (rect.width < 100 || rect.height < 100 || rect.top < 80) return;
+                        results.push({
+                            idx,
+                            tag: el.tagName.toLowerCase(),
+                            src,
+                            cx: Math.round(rect.left + rect.width / 2),
+                            cy: Math.round(rect.top + rect.height / 2),
+                            top: Math.round(rect.top),
+                        });
+                    });
+                    return results;
+                });
+
+                for (const card of mediaCards) {
+                    if (downloaded) break;
+                    try {
+                        console.log(`      🖱️ Hovering over ${card.tag} at (${card.cx}, ${card.cy})...`);
+                        await page.mouse.move(card.cx, card.cy);
+                        await page.waitForTimeout(800);
+
+                        const DOWNLOAD_TEXTS = ['download_2', 'file_download', 'download', 'save', 'save_alt'];
+                        const allBtns = await page.$$('button, a, [role="button"]');
+                        let dlBtn = null;
+
+                        for (const btn of allBtns) {
                             try {
                                 if (!(await btn.isVisible())) continue;
                                 const txt = (await btn.innerText()).trim().toLowerCase();
-                                const rect = await btn.boundingBox();
-                                if (!rect) continue;
-                                if ((txt === 'more_vert' || txt.includes('more')) && Math.abs(rect.top - card.top) < 200) {
-                                    await btn.click();
-                                    await page.waitForTimeout(500);
-                                    const menuItems = await page.$$('[role="menuitem"], [role="option"], li');
-                                    for (const item of menuItems) {
-                                        try {
-                                            const itxt = (await item.innerText()).trim().toLowerCase();
-                                            if (itxt.includes('download') || itxt.includes('save')) {
-                                                dlBtn = item;
-                                                break;
-                                            }
-                                        } catch {}
-                                    }
-                                    if (dlBtn) break;
-                                    await page.keyboard.press('Escape');
-                                    await page.waitForTimeout(300);
+                                const aria = (await btn.getAttribute('aria-label') || '').toLowerCase();
+                                const cls = (await btn.getAttribute('class') || '').toLowerCase();
+
+                                if (
+                                    DOWNLOAD_TEXTS.some(d => txt === d || txt.includes(d)) ||
+                                    aria.includes('download') || aria.includes('save') ||
+                                    cls.includes('download') || cls.includes('save')
+                                ) {
+                                    dlBtn = btn;
+                                    break;
                                 }
                             } catch {}
                         }
-                    }
 
-                    if (dlBtn && (await dlBtn.isVisible())) {
-                        console.log(`      📥 Clicking download button...`);
-                        const ext = type === 'video' ? 'mp4' : 'png';
-                        const filename = `flow_${type}_${Date.now()}.${ext}`;
-                        const localPath = path.join(downloadDir, filename);
+                        if (dlBtn && (await dlBtn.isVisible())) {
+                            console.log(`      📥 Clicking image download button...`);
+                            const filename = `flow_image_${Date.now()}.png`;
+                            const localPath = path.join(downloadDir, filename);
 
-                        const [download] = await Promise.all([
-                            page.waitForEvent('download', { timeout: 20000 }).catch(() => null),
-                            dlBtn.click(),
-                        ]);
+                            const [download] = await Promise.all([
+                                page.waitForEvent('download', { timeout: 20000 }).catch(() => null),
+                                dlBtn.click(),
+                            ]);
 
-                        if (download) {
-                            await download.saveAs(localPath);
-                            const localUrl = `http://localhost:${config.port || 5001}/downloads/${filename}`;
-                            console.log(`      💾 File saved: ${localPath}`);
-                            resultData.downloadPath = localPath;
-                            resultData.downloadUrl = localUrl;
-                            resultData.filename = filename;
-                            downloaded = true;
-                        } else {
-                            console.warn(`      ⚠️ Download event not fired — trying fetch fallback`);
+                            if (download) {
+                                await download.saveAs(localPath);
+                                const localUrl = `http://localhost:${config.port || 5001}/downloads/${filename}`;
+                                console.log(`      💾 Image file saved: ${localPath}`);
+                                resultData.downloadPath = localPath;
+                                resultData.downloadUrl = localUrl;
+                                resultData.filename = filename;
+                                downloaded = true;
+                            }
                         }
+                    } catch (cardErr) {
+                        console.warn(`      ⚠️ Image card download attempt failed: ${cardErr.message}`);
                     }
-                } catch (cardErr) {
-                    console.warn(`      ⚠️ Media card download attempt failed: ${cardErr.message}`);
                 }
-            }
 
-            // Step 3: Playwright page.request download (uses authenticated browser session context & follows redirects)
-            if (!downloaded && resultData) {
-                const isVideoType = type === 'video' || type === 'avatar_video';
-                const targetUrl = (isVideoType ? resultData.videoUrl : resultData.imageUrl)
-                    || resultData.videoUrl
-                    || resultData.imageUrl
-                    || (resultData.mediaUrls || [])[0];
-
-                if (targetUrl) {
-                    console.log(`      🌐 Playwright request downloading (${type}): ${targetUrl.substring(0, 80)}...`);
+                // Fallback: direct HTTP fetch for images
+                if (!downloaded && resultData && resultData.imageUrl) {
                     try {
-                        // page.request uses Chromium's network engine with active session cookies!
-                        const response = await page.request.get(targetUrl, {
+                        console.log(`      🌐 Downloading image via request: ${resultData.imageUrl.substring(0, 80)}...`);
+                        const response = await page.request.get(resultData.imageUrl, {
                             headers: {
                                 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                                 'Referer': 'https://labs.google/',
@@ -3235,45 +3563,20 @@ export class GoogleFxFlowTool extends BaseTool {
 
                         if (response.ok()) {
                             const buffer = await response.body();
-
-                            // Detect extension from actual Content-Type header (most reliable)
-                            const contentType = response.headers()['content-type'] || '';
-                            let ext;
-                            if (contentType.includes('video/mp4') || contentType.includes('video/')) {
-                                ext = 'mp4';
-                            } else if (contentType.includes('image/jpeg') || contentType.includes('image/jpg')) {
-                                ext = 'jpg';
-                            } else if (contentType.includes('image/webp')) {
-                                ext = 'webp';
-                            } else if (contentType.includes('image/gif')) {
-                                ext = 'gif';
-                            } else if (contentType.includes('image/png')) {
-                                ext = 'png';
-                            } else {
-                                // Fallback: guess from type parameter
-                                ext = isVideoType ? 'mp4' : 'png';
-                            }
-
-                            const filename = `flow_${type}_${Date.now()}.${ext}`;
+                            const filename = `flow_image_${Date.now()}.png`;
                             const localPath = path.join(downloadDir, filename);
-                            console.log(`      📋 Content-Type: "${contentType}" → saving as .${ext}`);
-
                             if (buffer && buffer.length > 500) {
                                 writeFileSync(localPath, buffer);
                                 const localUrl = `http://localhost:${config.port || 5001}/downloads/${filename}`;
-                                console.log(`      💾 File saved via Playwright request: ${localPath} (${Math.round(buffer.length / 1024)}KB)`);
+                                console.log(`      💾 Image saved via request: ${localPath} (${Math.round(buffer.length / 1024)}KB)`);
                                 resultData.downloadPath = localPath;
                                 resultData.downloadUrl = localUrl;
                                 resultData.filename = filename;
                                 downloaded = true;
-                            } else {
-                                console.warn(`      ⚠️ Downloaded buffer too small (${buffer ? buffer.length : 0} bytes)`);
                             }
-                        } else {
-                            console.warn(`      ⚠️ Playwright page.request HTTP ${response.status()}`);
                         }
                     } catch (dlErr) {
-                        console.warn(`      ⚠️ Playwright request download error: ${dlErr.message}`);
+                        console.warn(`      ⚠️ Image request download error: ${dlErr.message}`);
                     }
                 }
             }
@@ -3281,17 +3584,17 @@ export class GoogleFxFlowTool extends BaseTool {
             // Step 4: Upload downloaded asset to Cloudflare R2 under ai-content/${itemId}/${filename} & cleanup local file
             if (downloaded && resultData && resultData.downloadPath) {
                 try {
-                    const filename = resultData.filename || `flow_${type}_${Date.now()}.${(type === 'video' || type === 'avatar_video') ? 'mp4' : 'png'}`;
+                    const filename = resultData.filename || `flow_${type}_${Date.now()}.${isVideoType ? 'mp4' : 'png'}`;
                     const destinationKey = `ai-content/${itemId || 'gen_unknown'}/${filename}`;
 
-                    // Detect contentType from actual saved file extension (most reliable)
+                    // Detect contentType from actual saved file extension
                     const fileExt = filename.split('.').pop().toLowerCase();
                     const extToMime = {
                         mp4: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime',
                         png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg',
                         webp: 'image/webp', gif: 'image/gif',
                     };
-                    const contentType = extToMime[fileExt] || ((type === 'video' || type === 'avatar_video') ? 'video/mp4' : 'image/png');
+                    const contentType = extToMime[fileExt] || (isVideoType ? 'video/mp4' : 'image/png');
                     console.log(`      ☁️ R2 contentType: ${contentType} (from .${fileExt})`);
 
                     console.log(`      ☁️ Uploading asset to Cloudflare R2 key: ${destinationKey}...`);
@@ -3300,6 +3603,11 @@ export class GoogleFxFlowTool extends BaseTool {
                     if (r2Result && r2Result.r2Url) {
                         resultData.r2Url = r2Result.r2Url;
                         resultData.r2Key = r2Result.r2Key;
+                        if (isVideoType) {
+                            resultData.videoUrl = r2Result.r2Url;
+                        } else {
+                            resultData.imageUrl = r2Result.r2Url;
+                        }
                         console.log(`      ☁️ ✅ Cloudflare R2 Public URL: ${r2Result.r2Url}`);
 
                         // Delete local temporary file after successful upload to R2
@@ -3307,7 +3615,7 @@ export class GoogleFxFlowTool extends BaseTool {
                             try {
                                 unlinkSync(resultData.downloadPath);
                                 console.log(`      🗑️ Successfully deleted local temp file: ${resultData.downloadPath}`);
-                                resultData.downloadPath = null; // Cleared since local file is removed
+                                resultData.downloadPath = null;
                             } catch (unlinkErr) {
                                 console.warn(`      ⚠️ Could not delete local temp file: ${unlinkErr.message}`);
                             }
