@@ -1935,6 +1935,7 @@ export class GoogleFxFlowTool extends BaseTool {
 
                 const maxStaleMs = 300000; // 5 minutes max
                 let pollCount = 0;
+                let staleLoaderSec = 0; // tracks seconds of loader:YES with no percentage (headless false positive)
                 while (Date.now() - lastActivityTime < maxStaleMs) {
                     const elapsedSec = Math.round((Date.now() - uploadStartTime) / 1000);
                     pollCount++;
@@ -1954,8 +1955,9 @@ export class GoogleFxFlowTool extends BaseTool {
                         }
 
                         // Active loaders/spinners
+                        // NOTE: Do NOT use 'svg circle' — it matches decorative icons and is always present in Google Flow!
                         const hasLoader = Array.from(document.querySelectorAll(
-                            '[role="progressbar"], progress, [class*="progress"], [class*="spinner"], svg[class*="loading"], [class*="loader"], [class*="overlay"], svg circle'
+                            '[role="progressbar"], progress, [class*="progress-bar"], [class*="spinner"], mat-progress-bar, mat-spinner'
                         )).some(el => isVisible(el) && el.getBoundingClientRect().width > 5);
 
                         // Processing status text
@@ -2001,6 +2003,7 @@ export class GoogleFxFlowTool extends BaseTool {
                         if (uiState.currentPct !== lastProgressPct) {
                             lastProgressPct = uiState.currentPct;
                             lastActivityTime = Date.now();
+                            staleLoaderSec = 0; // reset stale counter on real progress
                             if (itemId) {
                                 try {
                                     const jobsCol = getJobsCollection();
@@ -2014,15 +2017,24 @@ export class GoogleFxFlowTool extends BaseTool {
                         }
                     } else if (uiState.hasLoader || uiState.isProcessing) {
                         sawProgress = true;
-                        lastActivityTime = Date.now();
+                        // NOTE: Do NOT reset lastActivityTime unconditionally here — in headless mode
+                        // hasLoader is a false-positive (always true) and would prevent the loop from ever exiting!
+                        // Only reset if pct was recently seen (real loader activity).
+                        if (elapsedSec <= 10 || uiState.isProcessing) {
+                            lastActivityTime = Date.now();
+                        }
+                        staleLoaderSec += 1.5; // each poll is ~1.5s
+                    } else {
+                        staleLoaderSec = 0;
                     }
 
                     // ── STRICT UPLOADING COMPLETION RULES ──
                     // 1. CANNOT BE DONE if percentage is currently active (0% - 99%)
                     // 2. CANNOT BE DONE if loaders or processing text are active
                     // 3. DONE if currentPct === 100
-                    // 4. DONE if percentage reached 100% or disappeared after sawProgress AND elapsedSec >= 8
-                    // 5. For long videos where no % text was rendered, MUST wait at least 35s before completing!
+                    // 4. DONE if pct disappeared after sawProgress AND no loader AND elapsedSec >= 8
+                    // 5. DONE if loader stuck true for 45+ seconds with no pct (headless false positive)
+                    // 6. For long videos where no % text was rendered, MUST wait at least 35s before completing!
                     let isUploadDone = false;
 
                     if (uiState.currentPct === 100) {
@@ -2033,10 +2045,15 @@ export class GoogleFxFlowTool extends BaseTool {
                         } else if (!sawProgress && elapsedSec >= 35) {
                             isUploadDone = true;
                         }
+                    } else if (staleLoaderSec >= 45 && sawProgress && uiState.currentPct === null) {
+                        // Headless false positive: loader stuck true with no percentage for 45s
+                        // Upload actually completed but the loader indicator never cleared
+                        console.log(`      ⚠️ Stale loader detected (${Math.round(staleLoaderSec)}s no progress) — treating upload as completed.`);
+                        isUploadDone = true;
                     }
 
                     if (isUploadDone) {
-                        console.log(`      ✅ Background upload 100% completed in UI (${elapsedSec}s elapsed) — now attaching media to prompt...`);
+                        console.log(`      ✅ Background upload completed in UI (${elapsedSec}s elapsed) — now attaching media to prompt...`);
                         uploadDoneInBackground = true;
                         break;
                     }
