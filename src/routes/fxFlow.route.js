@@ -162,7 +162,13 @@ router.get(['/status', '/status/:itemId'], async (req, res) => {
             });
         }
 
-        const genratedUrl = job.result?.r2Url || job.result?.videoUrl || job.r2Url || '';
+        const isVideo = job.type === 'video' || job.type === 'avatar_video';
+        let genratedUrl = '';
+        if (isVideo) {
+            genratedUrl = job.result?.videoUrl || job.result?.r2Url || (job.r2Url && !/\.(png|jpe?g|webp|gif)($|\?)/i.test(job.r2Url) ? job.r2Url : '') || '';
+        } else {
+            genratedUrl = job.result?.imageUrl || job.result?.r2Url || job.r2Url || '';
+        }
 
         const responseObj = {
             success: true,

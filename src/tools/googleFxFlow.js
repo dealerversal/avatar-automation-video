@@ -1,6 +1,6 @@
 // src/tools/googleFxFlow.js
 import { chromium } from 'playwright';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, createWriteStream } from 'fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, createWriteStream, renameSync } from 'fs';
 import https from 'https';
 import http from 'http';
 import path from 'path';
@@ -28,6 +28,34 @@ export async function closeSharedContext() {
             console.warn(`      ⚠️ Warning closing shared browser context: ${e.message}`);
         }
     }
+}
+
+/**
+ * Strictly inspects magic bytes to ensure a buffer is a real video stream (.mp4, .webm, .mov)
+ * and NOT an image file (.png, .jpeg, .gif, .webp).
+ */
+export function isVideoBuffer(buffer) {
+    if (!buffer || buffer.length < 12) return false;
+    // Disallow PNG: 89 50 4E 47
+    if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4E && buffer[3] === 0x47) return false;
+    // Disallow JPEG: FF D8 FF
+    if (buffer[0] === 0xFF && buffer[1] === 0xD8 && buffer[2] === 0xFF) return false;
+    // Disallow GIF: 47 49 46 38
+    if (buffer[0] === 0x47 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x38) return false;
+    // Disallow WebP: RIFF ... WEBP
+    if (buffer[0] === 0x52 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x46 &&
+        buffer[8] === 0x57 && buffer[9] === 0x45 && buffer[10] === 0x42 && buffer[11] === 0x50) return false;
+    // Disallow SVG text / HTML
+    const headText = buffer.slice(0, 64).toString('latin1').toLowerCase();
+    if (headText.includes('<svg') || headText.includes('<!doctype') || headText.includes('<html')) return false;
+
+    // Allowed MP4 check: ftyp at index 4
+    if (buffer[4] === 0x66 && buffer[5] === 0x74 && buffer[6] === 0x79 && buffer[7] === 0x70) return true;
+    // Allowed WebM check: 1A 45 DF A3
+    if (buffer[0] === 0x1A && buffer[1] === 0x45 && buffer[2] === 0xDF && buffer[3] === 0xA3) return true;
+    // Allowed QuickTime MOV check: moov or mdat or ftyp in first 64 bytes
+    if (headText.includes('ftyp') || headText.includes('moov') || headText.includes('mdat')) return true;
+    return false;
 }
 
 /**
@@ -394,6 +422,8 @@ export class GoogleFxFlowTool extends BaseTool {
 
             // 4. Add account Avatar to prompt + 5. Upload media — with internal retry (max 2 retries)
             let uploadedMediaUrls = [];
+            let mediaUploadedInThisProject = false;
+            this._mediaUploadedInCurrentProject = false;
             const MAX_UPLOAD_RETRIES = 2;
 
             for (let uploadAttempt = 1; uploadAttempt <= MAX_UPLOAD_RETRIES + 1; uploadAttempt++) {
@@ -418,12 +448,18 @@ export class GoogleFxFlowTool extends BaseTool {
                         await this._addAvatarToPrompt(page, effectiveAvatarName);
                     }
 
-                    // 5. Upload reference image/media to prompt
+                    // 5. Upload reference image/media to prompt (RULE: Upload strictly ONCE per project)
                     if (effectiveMediaUrl) {
                         this._lastMediaUrl = effectiveMediaUrl;
-                        console.log(`\n[5/7] 🖼️ [STEP 2/2] Uploading reference media from URL... (attempt ${uploadAttempt}/${MAX_UPLOAD_RETRIES + 1})`);
-                        uploadedMediaUrls = await this._uploadMediaFromUrl(page, effectiveMediaUrl, itemId);
-                        console.log(`      🔒 Uploaded media URLs captured for exclusion: ${uploadedMediaUrls.length}`);
+                        if (mediaUploadedInThisProject) {
+                            console.log(`\n[5/7] ℹ️ [RULE] Reference image was already uploaded in this project (${uploadedMediaUrls.length} url(s)). Skipping re-upload on retry in same project.`);
+                        } else {
+                            console.log(`\n[5/7] 🖼️ [STEP 2/2] Uploading reference media from URL... (attempt ${uploadAttempt}/${MAX_UPLOAD_RETRIES + 1})`);
+                            uploadedMediaUrls = await this._uploadMediaFromUrl(page, effectiveMediaUrl, itemId);
+                            mediaUploadedInThisProject = true;
+                            this._mediaUploadedInCurrentProject = true;
+                            console.log(`      🔒 Uploaded media URLs captured for exclusion: ${uploadedMediaUrls.length}`);
+                        }
                     }
 
                     // Success — break out of retry loop
@@ -2710,14 +2746,10 @@ export class GoogleFxFlowTool extends BaseTool {
             console.log(`      ✅ Avatar still attached in prompt bar — skipping re-add`);
         }
 
+        // RULE: In retry within the same project, do NOT re-upload image repeatedly.
+        // The image is already uploaded into this project's library/context.
         if (retryMediaUrl) {
-            console.log(`      🖼️ Re-uploading reference media for retry...`);
-            try {
-                await this._uploadMediaFromUrl(page, retryMediaUrl, null);
-                await page.waitForTimeout(1000);
-            } catch (uploadErr) {
-                console.warn(`      ⚠️ Could not re-upload media: ${uploadErr.message}`);
-            }
+            console.log(`      🖼️ [RETRY RULE] Reference media already uploaded in this project. Skipping image upload step during retry in same project.`);
         }
 
         await this._clickExpandButton(page);
@@ -3139,12 +3171,22 @@ export class GoogleFxFlowTool extends BaseTool {
                 // (In Google Flow UI, hovering on the tile starts live video playback)
                 // ─────────────────────────────────────────────────────────────
                 try {
-                    const tileBox = await page.evaluate(() => {
-                        const tile = document.querySelector('flow-video-tile, [class*="video-tile"], [aria-label="Open video in editor"], .video-container');
-                        if (!tile) return null;
-                        const r = tile.getBoundingClientRect();
+                    const tileBox = await page.evaluate(({ excludedUrls }) => {
+                        const excluded = new Set(excludedUrls || []);
+                        const tiles = Array.from(document.querySelectorAll('flow-video-tile, [class*="video-tile"], [aria-label="Open video in editor"]'))
+                            .filter(t => t.offsetWidth > 0 && t.offsetHeight > 0);
+                        // Prioritize new video tile whose thumbnail is NOT an excluded uploaded media URL
+                        const targetTile = tiles.find(t => {
+                            const img = t.querySelector('img[src]');
+                            if (!img) return false;
+                            const src = img.getAttribute('src') || '';
+                            return src && !excluded.has(src) && !src.includes('googleusercontent.com') && !src.includes('gstatic');
+                        }) || tiles[tiles.length - 1] || null;
+
+                        if (!targetTile) return null;
+                        const r = targetTile.getBoundingClientRect();
                         return { x: r.left + r.width / 2, y: r.top + r.height / 2, width: r.width, height: r.height };
-                    });
+                    }, { excludedUrls: Array.from(excludedUrlSet) });
 
                     if (tileBox) {
                         console.log(`      🖱️ Layer 1: Hovering over video tile at (${Math.round(tileBox.x)}, ${Math.round(tileBox.y)})...`);
@@ -3186,7 +3228,7 @@ export class GoogleFxFlowTool extends BaseTool {
                                 if (base64Data && base64Data.startsWith('data:')) {
                                     const base64Str = base64Data.split(',')[1];
                                     const buffer = Buffer.from(base64Str, 'base64');
-                                    if (buffer.length > 50000) {
+                                    if (buffer.length > 50000 && isVideoBuffer(buffer)) {
                                         const filename = `flow_video_${Date.now()}.mp4`;
                                         const localPath = path.join(downloadDir, filename);
                                         writeFileSync(localPath, buffer);
@@ -3195,8 +3237,11 @@ export class GoogleFxFlowTool extends BaseTool {
                                         resultData.downloadPath = localPath;
                                         resultData.downloadUrl = localUrl;
                                         resultData.videoUrl = localUrl;
+                                        resultData.imageUrl = null;
                                         resultData.filename = filename;
                                         downloaded = true;
+                                    } else if (buffer.length > 50000) {
+                                        console.warn(`      ⚠️ Blob data extracted was NOT a valid video stream (image/invalid content detected). Discarding.`);
                                     }
                                 }
                             } else if (videoData.isHttp && !videoData.src.includes('googleusercontent.com') && !videoData.src.includes('gstatic')) {
@@ -3204,7 +3249,7 @@ export class GoogleFxFlowTool extends BaseTool {
                                     const response = await page.request.get(videoData.src);
                                     if (response.ok()) {
                                         const buffer = await response.body();
-                                        if (buffer.length > 50000) {
+                                        if (buffer.length > 50000 && isVideoBuffer(buffer)) {
                                             const filename = `flow_video_${Date.now()}.mp4`;
                                             const localPath = path.join(downloadDir, filename);
                                             writeFileSync(localPath, buffer);
@@ -3213,8 +3258,11 @@ export class GoogleFxFlowTool extends BaseTool {
                                             resultData.downloadPath = localPath;
                                             resultData.downloadUrl = localUrl;
                                             resultData.videoUrl = localUrl;
+                                            resultData.imageUrl = null;
                                             resultData.filename = filename;
                                             downloaded = true;
+                                        } else if (buffer.length > 50000) {
+                                            console.warn(`      ⚠️ HTTP resource was NOT a valid video stream. Discarding.`);
                                         }
                                     }
                                 } catch (httpErr) {
@@ -3234,9 +3282,18 @@ export class GoogleFxFlowTool extends BaseTool {
                     try {
                         console.log(`      🔍 Layer 2: Attempting download via video tile 3-dot (⋮) menu...`);
 
-                        // Ensure mouse is hovering over the video tile so the top-right icons appear
-                        const tileCoords = await page.evaluate(() => {
-                            const tile = document.querySelector('flow-video-tile, [class*="video-tile"], [aria-label="Open video in editor"], .video-container');
+                        // Ensure mouse is hovering over the target video tile so the top-right icons appear
+                        const tileCoords = await page.evaluate(({ excludedUrls }) => {
+                            const excluded = new Set(excludedUrls || []);
+                            const tiles = Array.from(document.querySelectorAll('flow-video-tile, [class*="video-tile"], [aria-label="Open video in editor"]'))
+                                .filter(t => t.offsetWidth > 0 && t.offsetHeight > 0);
+                            const tile = tiles.find(t => {
+                                const img = t.querySelector('img[src]');
+                                if (!img) return false;
+                                const src = img.getAttribute('src') || '';
+                                return src && !excluded.has(src) && !src.includes('googleusercontent.com') && !src.includes('gstatic');
+                            }) || tiles[tiles.length - 1] || null;
+
                             if (!tile) return null;
                             const r = tile.getBoundingClientRect();
                             return {
@@ -3245,7 +3302,7 @@ export class GoogleFxFlowTool extends BaseTool {
                                 trX: r.right - 25,
                                 trY: r.top + 25,
                             };
-                        });
+                        }, { excludedUrls: Array.from(excludedUrlSet) });
 
                         if (tileCoords) {
                             await page.mouse.move(tileCoords.cx, tileCoords.cy);
@@ -3255,9 +3312,18 @@ export class GoogleFxFlowTool extends BaseTool {
                         }
 
                         // Find the 3-dot button in the top-right area of the video tile
-                        const menuBtnClicked = await page.evaluate(() => {
+                        const menuBtnClicked = await page.evaluate(({ excludedUrls }) => {
+                            const excluded = new Set(excludedUrls || []);
                             const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
-                            const tile = document.querySelector('flow-video-tile, [class*="video-tile"], [aria-label="Open video in editor"], .video-container');
+                            const tiles = Array.from(document.querySelectorAll('flow-video-tile, [class*="video-tile"], [aria-label="Open video in editor"]'))
+                                .filter(t => t.offsetWidth > 0 && t.offsetHeight > 0);
+                            const tile = tiles.find(t => {
+                                const img = t.querySelector('img[src]');
+                                if (!img) return false;
+                                const src = img.getAttribute('src') || '';
+                                return src && !excluded.has(src) && !src.includes('googleusercontent.com') && !src.includes('gstatic');
+                            }) || tiles[tiles.length - 1] || null;
+
                             const tBox = tile ? tile.getBoundingClientRect() : null;
 
                             const btn = buttons.find(b => {
@@ -3281,7 +3347,7 @@ export class GoogleFxFlowTool extends BaseTool {
                                 return true;
                             }
                             return false;
-                        });
+                        }, { excludedUrls: Array.from(excludedUrlSet) });
 
                         if (menuBtnClicked) {
                             console.log(`      🖱️ Clicked 3-dot menu button. Waiting for dropdown...`);
@@ -3322,23 +3388,35 @@ export class GoogleFxFlowTool extends BaseTool {
 
                                 if (subItem720 && subItem720.asElement()) {
                                     console.log(`      📥 Found "720p (Original size)" option! Triggering browser download event...`);
-                                    const filename = `flow_video_${Date.now()}.mp4`;
-                                    const localPath = path.join(downloadDir, filename);
-
                                     const [download] = await Promise.all([
                                         page.waitForEvent('download', { timeout: 25000 }).catch(() => null),
                                         subItem720.asElement().click(),
                                     ]);
 
                                     if (download) {
-                                        await download.saveAs(localPath);
-                                        const localUrl = `http://localhost:${config.port || 5001}/downloads/${filename}`;
-                                        console.log(`      💾 ✅ Video saved via 3-dot menu 720p: ${localPath}`);
-                                        resultData.downloadPath = localPath;
-                                        resultData.downloadUrl = localUrl;
-                                        resultData.videoUrl = localUrl;
-                                        resultData.filename = filename;
-                                        downloaded = true;
+                                        const suggested = download.suggestedFilename() || '';
+                                        console.log(`      📥 Browser download triggered: suggestedFilename="${suggested}"`);
+                                        if (/\.(png|jpe?g|webp|gif)$/i.test(suggested)) {
+                                            console.warn(`      ⚠️ Download event returned an IMAGE (${suggested}), not a video! Rejecting.`);
+                                        } else {
+                                            const filename = `flow_video_${Date.now()}.mp4`;
+                                            const localPath = path.join(downloadDir, filename);
+                                            await download.saveAs(localPath);
+                                            const fileBuf = readFileSync(localPath);
+                                            if (isVideoBuffer(fileBuf)) {
+                                                const localUrl = `http://localhost:${config.port || 5001}/downloads/${filename}`;
+                                                console.log(`      💾 ✅ Video verified and saved via 3-dot menu 720p: ${localPath} (${Math.round(fileBuf.length / 1024)}KB)`);
+                                                resultData.downloadPath = localPath;
+                                                resultData.downloadUrl = localUrl;
+                                                resultData.videoUrl = localUrl;
+                                                resultData.imageUrl = null;
+                                                resultData.filename = filename;
+                                                downloaded = true;
+                                            } else {
+                                                console.warn(`      ⚠️ Downloaded file is NOT a valid video stream (image/invalid bytes). Deleting ${localPath}.`);
+                                                try { unlinkSync(localPath); } catch {}
+                                            }
+                                        }
                                     } else {
                                         console.warn(`      ⚠️ Download event not fired after clicking 720p`);
                                     }
@@ -3362,9 +3440,18 @@ export class GoogleFxFlowTool extends BaseTool {
                 if (!downloaded) {
                     try {
                         console.log(`      🎬 Layer 3: Clicking play icon / video tile to open player & download...`);
-                        const tileClicked = await page.evaluate(() => {
+                        const tileClicked = await page.evaluate(({ excludedUrls }) => {
+                            const excluded = new Set(excludedUrls || []);
                             const btns = Array.from(document.querySelectorAll('button, [role="button"]'));
-                            const tile = document.querySelector('flow-video-tile, [class*="video-tile"], [aria-label="Open video in editor"], .video-container');
+                            const tiles = Array.from(document.querySelectorAll('flow-video-tile, [class*="video-tile"], [aria-label="Open video in editor"]'))
+                                .filter(t => t.offsetWidth > 0 && t.offsetHeight > 0);
+                            const tile = tiles.find(t => {
+                                const img = t.querySelector('img[src]');
+                                if (!img) return false;
+                                const src = img.getAttribute('src') || '';
+                                return src && !excluded.has(src) && !src.includes('googleusercontent.com') && !src.includes('gstatic');
+                            }) || tiles[tiles.length - 1] || null;
+
                             if (!tile) return false;
                             const tBox = tile.getBoundingClientRect();
                             const playBtn = btns.find(b => {
@@ -3380,7 +3467,7 @@ export class GoogleFxFlowTool extends BaseTool {
                             }
                             tile.click();
                             return true;
-                        });
+                        }, { excludedUrls: Array.from(excludedUrlSet) });
 
                         if (tileClicked) {
                             console.log(`      🖱️ Opened player/editor view. Waiting 3s for player to render...`);
@@ -3410,7 +3497,7 @@ export class GoogleFxFlowTool extends BaseTool {
 
                                 if (base64Data && base64Data.startsWith('data:')) {
                                     const buffer = Buffer.from(base64Data.split(',')[1], 'base64');
-                                    if (buffer.length > 50000) {
+                                    if (buffer.length > 50000 && isVideoBuffer(buffer)) {
                                         const filename = `flow_video_${Date.now()}.mp4`;
                                         const localPath = path.join(downloadDir, filename);
                                         writeFileSync(localPath, buffer);
@@ -3419,8 +3506,11 @@ export class GoogleFxFlowTool extends BaseTool {
                                         resultData.downloadPath = localPath;
                                         resultData.downloadUrl = localUrl;
                                         resultData.videoUrl = localUrl;
+                                        resultData.imageUrl = null;
                                         resultData.filename = filename;
                                         downloaded = true;
+                                    } else if (buffer.length > 50000) {
+                                        console.warn(`      ⚠️ Editor blob data was NOT a valid video stream. Rejecting.`);
                                     }
                                 }
                             }
@@ -3440,23 +3530,35 @@ export class GoogleFxFlowTool extends BaseTool {
 
                                 if (editorDlBtn && editorDlBtn.asElement()) {
                                     console.log(`      📥 Clicking toolbar download/export button in editor...`);
-                                    const filename = `flow_video_${Date.now()}.mp4`;
-                                    const localPath = path.join(downloadDir, filename);
-
                                     const [download] = await Promise.all([
                                         page.waitForEvent('download', { timeout: 25000 }).catch(() => null),
                                         editorDlBtn.asElement().click(),
                                     ]);
 
                                     if (download) {
-                                        await download.saveAs(localPath);
-                                        const localUrl = `http://localhost:${config.port || 5001}/downloads/${filename}`;
-                                        console.log(`      💾 ✅ Video saved from editor toolbar: ${localPath}`);
-                                        resultData.downloadPath = localPath;
-                                        resultData.downloadUrl = localUrl;
-                                        resultData.videoUrl = localUrl;
-                                        resultData.filename = filename;
-                                        downloaded = true;
+                                        const suggested = download.suggestedFilename() || '';
+                                        console.log(`      📥 Editor toolbar download triggered: suggestedFilename="${suggested}"`);
+                                        if (/\.(png|jpe?g|webp|gif)$/i.test(suggested)) {
+                                            console.warn(`      ⚠️ Editor toolbar downloaded an IMAGE (${suggested}), not a video! Rejecting.`);
+                                        } else {
+                                            const filename = `flow_video_${Date.now()}.mp4`;
+                                            const localPath = path.join(downloadDir, filename);
+                                            await download.saveAs(localPath);
+                                            const fileBuf = readFileSync(localPath);
+                                            if (isVideoBuffer(fileBuf)) {
+                                                const localUrl = `http://localhost:${config.port || 5001}/downloads/${filename}`;
+                                                console.log(`      💾 ✅ Video verified and saved from editor toolbar: ${localPath} (${Math.round(fileBuf.length / 1024)}KB)`);
+                                                resultData.downloadPath = localPath;
+                                                resultData.downloadUrl = localUrl;
+                                                resultData.videoUrl = localUrl;
+                                                resultData.imageUrl = null;
+                                                resultData.filename = filename;
+                                                downloaded = true;
+                                            } else {
+                                                console.warn(`      ⚠️ Editor toolbar downloaded file is NOT a valid video stream. Deleting ${localPath}.`);
+                                                try { unlinkSync(localPath); } catch {}
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -3464,6 +3566,11 @@ export class GoogleFxFlowTool extends BaseTool {
                     } catch (editorErr) {
                         console.warn(`      ⚠️ Layer 3 editor download error: ${editorErr.message}`);
                     }
+                }
+
+                // Strict enforcement: For video generation, download MUST produce a real video file
+                if (!downloaded || !resultData.downloadPath) {
+                    throw new Error('[GoogleFX] ❌ Video generation was completed in UI, but downloading valid video asset (.mp4) failed. Refusing to complete job without a valid video file.');
                 }
             } else {
                 // ─────────────────────────────────────────────────────────────
@@ -3605,8 +3712,10 @@ export class GoogleFxFlowTool extends BaseTool {
                         resultData.r2Key = r2Result.r2Key;
                         if (isVideoType) {
                             resultData.videoUrl = r2Result.r2Url;
+                            resultData.imageUrl = null; // Strict isolation: Video job NEVER returns imageUrl
                         } else {
                             resultData.imageUrl = r2Result.r2Url;
+                            resultData.videoUrl = null;
                         }
                         console.log(`      ☁️ ✅ Cloudflare R2 Public URL: ${r2Result.r2Url}`);
 
@@ -3630,9 +3739,13 @@ export class GoogleFxFlowTool extends BaseTool {
                 console.log(`      ✅ Asset download & R2 processing complete!`);
             } else {
                 console.warn(`      ⚠️ Could not download asset — returning URL only`);
+                if (isVideoType) {
+                    throw new Error('[GoogleFX] ❌ Video was generated in UI, but downloading valid video asset (.mp4) failed. Refusing to complete job without a valid video file.');
+                }
             }
         } catch (errDl) {
-            console.warn(`      ⚠️ Download section error: ${errDl.message}`);
+            console.error(`      ❌ Download section error: ${errDl.message}`);
+            if (isVideoType) throw errDl;
         }
 
         return resultData;

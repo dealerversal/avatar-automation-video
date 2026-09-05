@@ -66,8 +66,18 @@ class GenerationQueue {
 
             const durationMs = Date.now() - startTime;
             const isVideoType = type === 'video' || type === 'avatar_video';
-            const primaryVideoUrl = result.videoUrl || (result.mediaUrls && result.mediaUrls.find(url => url.includes('.mp4') || url.includes('video'))) || (result.mediaUrls && result.mediaUrls[0]) || null;
-            const primaryImageUrl = result.imageUrl || (type === 'image' && result.mediaUrls && result.mediaUrls[0]) || null;
+
+            // Strict URL isolation: Video job NEVER falls back to image thumbnails in mediaUrls
+            const primaryVideoUrl = isVideoType
+                ? (result.videoUrl || (result.mediaUrls && result.mediaUrls.find(url => url.includes('.mp4') || url.includes('.webm') || url.includes('video'))) || null)
+                : null;
+            const primaryImageUrl = type === 'image'
+                ? (result.imageUrl || (result.mediaUrls && result.mediaUrls[0]) || null)
+                : null;
+
+            if (isVideoType && !result.r2Url && !primaryVideoUrl) {
+                throw new Error(`[Queue Worker] Video generation job ${itemId} finished without a valid video asset (only video assets can complete video jobs).`);
+            }
 
             // Update DB with completed result & R2 cloud storage URLs
             await jobsCol.updateOne(
@@ -75,10 +85,10 @@ class GenerationQueue {
                 {
                     $set: {
                         status: 'completed',
-                        genratedUrl: result.r2Url || primaryVideoUrl || primaryImageUrl || '',
+                        genratedUrl: isVideoType ? (result.r2Url || primaryVideoUrl || '') : (result.r2Url || primaryImageUrl || ''),
                         result: {
-                            videoUrl: isVideoType ? primaryVideoUrl : null,
-                            imageUrl: type === 'image' ? primaryImageUrl : null,
+                            videoUrl: isVideoType ? (result.r2Url || primaryVideoUrl) : null,
+                            imageUrl: isVideoType ? null : (result.r2Url || primaryImageUrl),
                             r2Url: result.r2Url || null,
                             r2Key: result.r2Key || null,
                             downloadPath: result.downloadPath || null,
