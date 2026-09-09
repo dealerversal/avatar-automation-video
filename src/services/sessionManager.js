@@ -6,7 +6,7 @@ import { config } from '../config.js';
 import { logger } from '../utils/logger.js';
 import { closeSharedContext } from '../tools/googleFxFlow.js';
 
-const GOOGLE_FX_URL = 'https://labs.google/fx/tools/flow';
+const GOOGLE_FX_URL = 'https://flow.google.com/';
 
 /**
  * Normalizes input cookies/storageState into Playwright cookie format.
@@ -88,12 +88,16 @@ function normalizeCookie(cookie) {
 }
 
 export class SessionManager {
+    static _cachedStatus = null;
+    static _cachedStatusTimestamp = 0;
+
     /**
      * Checks if current browser-profile is logged into Google FX Flow.
+     * Caches successful status checks to ensure lightning fast responses.
      */
-    static async checkStatus() {
+    static async checkStatus({ force = false } = {}) {
         const profileDir = config.browser.profileDir;
-        logger.info(`[SessionManager] Checking auth status for profile at: ${profileDir}`);
+        const statusCacheFile = path.join(profileDir, 'session-status.json');
 
         if (!existsSync(profileDir)) {
             return {
@@ -101,6 +105,40 @@ export class SessionManager {
                 message: 'No browser profile directory found on server.',
             };
         }
+
+        // Fast path: if not forced, return cached status if available
+        if (!force) {
+            if (this._cachedStatus && Date.now() - (this._cachedStatusTimestamp || 0) < 10 * 60 * 1000) {
+                return this._cachedStatus;
+            }
+            if (existsSync(statusCacheFile)) {
+                try {
+                    const cached = JSON.parse(readFileSync(statusCacheFile, 'utf8'));
+                    if (cached && typeof cached.authenticated === 'boolean') {
+                        this._cachedStatus = cached;
+                        this._cachedStatusTimestamp = Date.now();
+                        return cached;
+                    }
+                } catch (e) { }
+            }
+        }
+
+        const cookiesJsonPath = path.join(profileDir, 'cookies.json');
+        const storageStateJsonPath = path.join(profileDir, 'storageState.json');
+        const hasCookiesFile = existsSync(cookiesJsonPath) || existsSync(storageStateJsonPath);
+        const hasDefaultDir = existsSync(path.join(profileDir, 'Default'));
+
+        if (!hasCookiesFile && !hasDefaultDir) {
+            const noAuthResult = {
+                authenticated: false,
+                message: 'No active Google session cookies or browser profile found on server.',
+            };
+            this._cachedStatus = noAuthResult;
+            this._cachedStatusTimestamp = Date.now();
+            return noAuthResult;
+        }
+
+        logger.info(`[SessionManager] Running live auth verification for profile at: ${profileDir}`);
 
         await closeSharedContext();
 
@@ -120,19 +158,10 @@ export class SessionManager {
         };
 
         try {
-            try {
-                context = await chromium.launchPersistentContext(profileDir, {
-                    ...checkOptions,
-                    channel: 'chrome',
-                    ignoreDefaultArgs: ['--enable-automation'],
-                });
-            } catch (cErr) {
-                context = await chromium.launchPersistentContext(profileDir, checkOptions);
-            }
+            // Launch Playwright Chromium directly (skip non-existent channel: 'chrome' on Linux)
+            context = await chromium.launchPersistentContext(profileDir, checkOptions);
 
             // Auto-inject decrypted cookies if cookies.json or storageState.json exists in profileDir
-            const cookiesJsonPath = path.join(profileDir, 'cookies.json');
-            const storageStateJsonPath = path.join(profileDir, 'storageState.json');
             if (existsSync(cookiesJsonPath)) {
                 try {
                     const cData = JSON.parse(readFileSync(cookiesJsonPath, 'utf8'));
@@ -165,32 +194,23 @@ export class SessionManager {
             const page = await context.newPage();
             await page.goto(GOOGLE_FX_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
 
-            await page.waitForTimeout(4000);
+            // Wait for account button or sign in indicators
+            await page.waitForSelector('a[aria-label*="Google Account"], button[aria-label*="Google Account"], [aria-label*="@"], text=/Sign in|Log in/i', { timeout: 10000 }).catch(() => {});
+
             const currentUrl = page.url();
             const pageTitle = await page.title();
-
-            const isSignInVisible = await page
-                .locator('text=/Sign in|Log in/i')
-                .isVisible()
-                .catch(() => false);
-
-            const hasPromptInput = await page
-                .locator('textarea, [contenteditable="true"], button:has-text("Generate")')
-                .count()
-                .then((cnt) => cnt > 0)
-                .catch(() => false);
 
             // Attempt to extract user info from Google Account avatar / DOM
             let user = null;
             try {
-                const accountElem = await page
-                    .locator('a[aria-label*="Google Account"], button[aria-label*="Google Account"], img[src*="googleusercontent.com"], [aria-label*="@gmail.com"]')
+                const accountElem = page
+                    .locator('a[aria-label*="Google Account"], button[aria-label*="Google Account"], [aria-label*="@"]')
                     .first();
                 if (await accountElem.count() > 0) {
                     const ariaLabel = (await accountElem.getAttribute('aria-label')) || '';
-                    const avatarSrc = await page
-                        .locator('img[src*="googleusercontent.com"]')
-                        .first()
+                    const avatarSrc = await accountElem
+                        .locator('img[src*="google.com"], img[src*="googleusercontent.com"], img.gb_X, img.gbii')
+                        .last()
                         .getAttribute('src')
                         .catch(() => null);
 
@@ -202,7 +222,7 @@ export class SessionManager {
                         email = emailMatch[1];
                     }
 
-                    const nameMatch = ariaLabel.match(/Google Account:\s*([^(]+)/i);
+                    const nameMatch = ariaLabel.match(/Google Account:\s*([^\n(]+)/i);
                     if (nameMatch) {
                         name = nameMatch[1].trim();
                     }
@@ -233,17 +253,27 @@ export class SessionManager {
 
             const authenticated = hasGoogleCookies && !currentUrl.includes('accounts.google.com');
 
-            return {
+            const result = {
                 authenticated,
                 url: currentUrl,
                 title: pageTitle,
                 user,
                 cookieCount: cookies.length,
                 hasGoogleCookies,
+                lastVerified: new Date().toISOString(),
                 message: authenticated
                     ? 'Successfully authenticated with Google Flow!'
                     : 'Not authenticated with Google. Please upload your browser-profile.zip.',
             };
+
+            // Save to disk and memory cache
+            try {
+                writeFileSync(statusCacheFile, JSON.stringify(result, null, 2), 'utf8');
+                this._cachedStatus = result;
+                this._cachedStatusTimestamp = Date.now();
+            } catch (e) { }
+
+            return result;
         } catch (error) {
             if (context) await context.close().catch(() => { });
             logger.error('[SessionManager] Error checking status:', error);
@@ -424,6 +454,13 @@ export class SessionManager {
     static async clearSession() {
         const profileDir = config.browser.profileDir;
         logger.info(`[SessionManager] Clearing browser profile at: ${profileDir}`);
+
+        this._cachedStatus = null;
+        this._cachedStatusTimestamp = 0;
+        const statusCacheFile = path.join(profileDir, 'session-status.json');
+        if (existsSync(statusCacheFile)) {
+            try { rmSync(statusCacheFile, { force: true }); } catch (e) { }
+        }
 
         await closeSharedContext();
 

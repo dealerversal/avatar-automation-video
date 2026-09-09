@@ -11,7 +11,8 @@ router.use(authenticateSuperAdmin);
 // GET /api/session/status
 router.get('/status', async (req, res) => {
     try {
-        const result = await SessionManager.checkStatus();
+        const force = req.query.force === 'true';
+        const result = await SessionManager.checkStatus({ force });
         res.json({ success: true, ...result });
     } catch (error) {
         logger.error('[SessionRoute] Status check error:', error);
@@ -34,7 +35,7 @@ router.post('/cookies', async (req, res) => {
 // POST /api/session/verify - Run a live headless verification on Google FX Flow
 router.post('/verify', async (req, res) => {
     try {
-        const result = await SessionManager.checkStatus();
+        const result = await SessionManager.checkStatus({ force: true });
         res.json({ success: true, ...result });
     } catch (error) {
         logger.error('[SessionRoute] Verify session error:', error);
