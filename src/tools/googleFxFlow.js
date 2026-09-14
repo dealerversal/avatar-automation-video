@@ -1457,60 +1457,10 @@ export class GoogleFxFlowTool extends BaseTool {
             }
             await page.waitForTimeout(1000);
 
-            // 4d. Duration Pill Selection (4s, 6s, 8s, 10s) via physical mouse click
-            if (isVideoJob) {
-                let parsedDur = settings.duration || settings.targetDuration || settings.dur;
-                if (!parsedDur && promptText) {
-                    const durMatch = promptText.match(/(?:Target Scene Duration|Duration)\s*:\s*(\d+)/i);
-                    if (durMatch && durMatch[1]) parsedDur = parseInt(durMatch[1], 10);
-                }
-                const rawDur = parseInt(parsedDur, 10) || 10;
-                let targetDurText = '10s';
-                if (rawDur <= 4) targetDurText = '4s';
-                else if (rawDur <= 6) targetDurText = '6s';
-                else if (rawDur <= 8) targetDurText = '8s';
-                else targetDurText = '10s';
-
-                console.log(`      ⏱️ Selecting Video Duration pill "${targetDurText}" (raw: ${rawDur}s)...`);
-                const durCoords = await page.evaluate(({ targetDurText, rawDur }) => {
-                    const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
-                    const allMatching = Array.from(document.querySelectorAll('*')).filter(el => {
-                        if (!isVisible(el)) return false;
-                        const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
-                        return txt === 'video generation default';
-                    });
-                    const headingEl = allMatching.sort((a, b) => (a.innerText || '').length - (b.innerText || '').length)[0];
-                    let container = headingEl ? headingEl.parentElement : document.body;
-                    while (container && container !== document.body) {
-                        const btns = container.querySelectorAll('button');
-                        if (btns.length >= 2 && container.clientHeight < window.innerHeight * 0.8) break;
-                        container = container.parentElement;
-                    }
-                    if (!container) container = document.body;
-
-                    const pills = Array.from(container.querySelectorAll('button')).filter(p => isVisible(p));
-                    const durPill = pills.find(p => {
-                        const txt = (p.innerText || p.textContent || '').trim().toLowerCase();
-                        return txt === targetDurText.toLowerCase() || txt === `${rawDur}s` || txt === `${rawDur}s.` || txt === `${rawDur} sec` || txt === `${rawDur}s`;
-                    });
-
-                    if (durPill) {
-                        if (window.__highlight) window.__highlight(durPill);
-                        const r = durPill.getBoundingClientRect();
-                        return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2) };
-                    }
-                    return null;
-                }, { targetDurText, rawDur });
-
-                if (durCoords && durCoords.cx > 0 && durCoords.cy > 0) {
-                    console.log(`      🖱️ Mouse clicking Duration "${targetDurText}" at [${durCoords.cx}, ${durCoords.cy}]...`);
-                    try { await page.mouse.click(durCoords.cx, durCoords.cy); } catch {}
-                    console.log(`      ✅ Selected Duration "${targetDurText}" in Video generation default`);
-                } else {
-                    console.warn(`      ⚠️ Could not locate Duration pill "${targetDurText}" in section`);
-                }
-                await page.waitForTimeout(1000);
-            }
+            // 4d. Duration Pill Selection — SKIPPED.
+            // Duration is embedded directly in the prompt text (e.g. "Duration: 8 seconds")
+            // by the prompt builder and dynamically assigned per scene (6s / 8s / 10s)
+            // based on the scene's voiceover word count. No fixed UI pill interaction needed.
 
             // ── STEP 5: Click Save Button ───────────────────────────────────────
             let saveConfirmed = false;
