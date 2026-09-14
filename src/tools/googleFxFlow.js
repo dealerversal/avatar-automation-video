@@ -170,17 +170,6 @@ export class GoogleFxFlowTool extends BaseTool {
                 }
             } catch {}
 
-            console.log(`\n[GoogleFX] 🚀 Launching persistent browser context from: ${profileDir}`);
-            
-            // ── On Linux VPS: use full Chromium binary with SwiftShader GPU emulation ──
-            // chrome-headless-shell (Playwright default) disables GPU/WebGL which causes
-            // Google Flow Agent to fail at video rendering ("The agent failed").
-            // Full Chromium with --use-gl=swiftshader enables software GPU rendering.
-            const isLinux = process.platform === 'linux';
-            const linuxChromiumPath = '/root/.cache/ms-playwright/chromium-1208/chrome-linux64/chrome';
-            const { existsSync: fsExistsSync } = await import('fs');
-            const useLinuxChromium = isLinux && fsExistsSync(linuxChromiumPath);
-
             const launchOptions = {
                 headless: config.browser.headless,
                 slowMo: config.browser.slowMo,
@@ -188,14 +177,10 @@ export class GoogleFxFlowTool extends BaseTool {
                     '--no-sandbox',
                     '--disable-setuid-sandbox',
                     '--disable-blink-features=AutomationControlled',
-                    // ── GPU: use SwiftShader software rendering on VPS (not --disable-gpu) ──
-                    // --disable-gpu causes Google Flow Agent video rendering to fail.
-                    // SwiftShader provides software GPU emulation that enables WebGL/rendering.
-                    ...(isLinux ? ['--use-gl=swiftshader', '--use-angle=swiftshader'] : ['--disable-gpu']),
+                    '--disable-gpu',
                     '--disable-dev-shm-usage',
                     '--no-first-run',
                     '--no-default-browser-check',
-                    // ── VPS headless stability: enforce consistent viewport & font rendering ──
                     '--window-size=1280,800',
                     '--force-device-scale-factor=1',
                     '--hide-scrollbars',
@@ -207,20 +192,15 @@ export class GoogleFxFlowTool extends BaseTool {
                 viewport: { width: 1280, height: 800 },
                 userAgent:
                     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36',
-                // On Linux VPS: use full Chromium (has WebGL/GPU support via SwiftShader)
-                ...(useLinuxChromium ? { executablePath: linuxChromiumPath } : {}),
             };
-
-            console.log(`[GoogleFX] 🖥️ Platform: ${process.platform} | Browser: ${useLinuxChromium ? 'Full Chromium (SwiftShader GPU)' : 'Default (macOS Chrome)'}`);
 
             try {
                 sharedContext = await chromium.launchPersistentContext(profileDir, {
                     ...launchOptions,
-                    ...(useLinuxChromium ? {} : { channel: 'chrome' }),
+                    channel: 'chrome',
                     ignoreDefaultArgs: ['--enable-automation'],
                 });
             } catch (e1) {
-                console.warn(`[GoogleFX] ⚠️ Primary browser launch failed (${e1.message}) — falling back...`);
                 sharedContext = await chromium.launchPersistentContext(profileDir, launchOptions);
             }
 
