@@ -2846,13 +2846,16 @@ export class GoogleFxFlowTool extends BaseTool {
                     }
                 });
 
-                // Detect Google's "Something went wrong" error UI
+                // Detect Google's "Something went wrong" OR "The agent failed" error UI
                 const hasTryAgainBtn = !!Array.from(document.querySelectorAll('button')).find(b =>
                     b.offsetWidth > 0 && (b.innerText || b.textContent || '').trim().toLowerCase() === 'try again'
                 );
                 const isGoogleError = hasTryAgainBtn && (
                     bodyText.includes('Something went wrong') ||
-                    bodyText.includes('something went wrong')
+                    bodyText.includes('something went wrong') ||
+                    bodyText.includes('The agent failed') ||
+                    bodyText.includes('agent failed') ||
+                    bodyText.includes('Agent failed')
                 );
 
                 // ── KEY DETECTION: flow-video-tile custom element ──
