@@ -2909,27 +2909,26 @@ export class GoogleFxFlowTool extends BaseTool {
                 };
             }, { targetType: type, excludedUrls: Array.from(excludedUrlSet) });
 
-            // ── GOOGLE ERROR CHECK: "Something went wrong. Try again." ──
+            // ── GOOGLE ERROR CHECK: "Something went wrong" / "The agent failed" / "Rendering failure" ──
             // Only trigger on VISIBLE "Try again" button — NOT on chat text containing those words
-            if (liveState.isGoogleError && liveState.hasTryAgainBtn) {
-                console.warn(`      ⚠️ "Something went wrong" detected in Google Flow UI!`);
+            if ((liveState.isGoogleError || liveState.isRenderingFailure) && liveState.hasTryAgainBtn) {
+                const errLabel = liveState.isRenderingFailure ? '"Rendering failure"' : '"Agent failed / Something went wrong"';
+                console.warn(`      ⚠️ ${errLabel} detected in Google Flow UI — immediate retry triggered!`);
                 retryCount = (retryCount || 0) + 1;
                 if (retryCount > 3) {
-                    throw new Error('[GoogleFX] ❌ "Something went wrong" error repeated 3 times — aborting.');
+                    throw new Error(`[GoogleFX] ❌ ${errLabel} error repeated 3 times — aborting.`);
                 }
                 console.log(`      🔄 Google error retry ${retryCount}/3 — restoring state and re-submitting...`);
 
                 // Auto-click the "Try again" button to reset the error state
-                if (liveState.hasTryAgainBtn) {
-                    await page.evaluate(() => {
-                        const btn = Array.from(document.querySelectorAll('button')).find(b =>
-                            b.offsetWidth > 0 && (b.innerText || b.textContent || '').trim().toLowerCase() === 'try again'
-                        );
-                        if (btn) btn.click();
-                    });
-                    console.log(`      🖱️ Clicked "Try again" button.`);
-                    await page.waitForTimeout(3000);
-                }
+                await page.evaluate(() => {
+                    const btn = Array.from(document.querySelectorAll('button')).find(b =>
+                        b.offsetWidth > 0 && (b.innerText || b.textContent || '').trim().toLowerCase() === 'try again'
+                    );
+                    if (btn) btn.click();
+                });
+                console.log(`      🖱️ Clicked "Try again" button.`);
+                await page.waitForTimeout(3000);
 
                 stuckProgressCount = 0;
                 lastProgressPct = -1;
