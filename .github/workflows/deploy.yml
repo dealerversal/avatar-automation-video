@@ -1,4 +1,4 @@
-name: Deploy Avatar Automation Video VPS
+name: Deploy Avatar Automation Video
 
 on:
   push:
