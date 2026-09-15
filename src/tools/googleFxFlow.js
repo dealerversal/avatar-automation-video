@@ -2890,11 +2890,16 @@ export class GoogleFxFlowTool extends BaseTool {
                     }
                 });
 
-                // Detect Google's "Something went wrong" OR "The agent failed" error UI
+                // Detect Google's "Something went wrong" OR "The agent failed" OR "You are asking too fast" error UI
                 const hasTryAgainBtn = !!Array.from(document.querySelectorAll('button')).find(b =>
                     b.offsetWidth > 0 && (b.innerText || b.textContent || '').trim().toLowerCase() === 'try again'
                 );
-                const isGoogleError = hasTryAgainBtn && (
+                const isRateLimitError = bodyText.includes('asking too fast') ||
+                    bodyText.includes('too fast') ||
+                    bodyText.includes('Please slow down') ||
+                    bodyText.includes('slow down and try again');
+
+                const isGoogleError = hasTryAgainBtn && !isRateLimitError && (
                     bodyText.includes('Something went wrong') ||
                     bodyText.includes('something went wrong') ||
                     bodyText.includes('The agent failed') ||
@@ -2948,10 +2953,59 @@ export class GoogleFxFlowTool extends BaseTool {
                     videoTileCount: newVideoTiles.length + chatVideoContainers.length,  // flow-video-tile count
                     text: bodyText.substring(0, 3000),
                     isCancelled: bodyText.includes('Response was cancelled') || bodyText.includes('response was cancelled'),
+                    isRateLimitError,
                     isGoogleError,
                     hasTryAgainBtn,
                 };
             }, { targetType: type, excludedUrls: Array.from(excludedUrlSet) });
+
+            // ── GOOGLE RATE LIMIT CHECK: "You are asking too fast. Please slow down and try again." ──
+            if (liveState.isRateLimitError) {
+                console.warn(`      ⏳ Google Flow Rate Limit detected: "You are asking too fast. Please slow down and try again."`);
+                retryCount = (retryCount || 0) + 1;
+                if (retryCount > 4) {
+                    throw new Error(`[GoogleFX] ❌ Google Flow Rate Limit ("You are asking too fast") persisted after 4 retries — aborting.`);
+                }
+                console.log(`      ⏳ Cooling down for 25 seconds before retrying (attempt ${retryCount}/4)...`);
+                if (itemId) {
+                    try {
+                        const jobsCol = getJobsCollection();
+                        await jobsCol.updateOne(
+                            { itemId },
+                            {
+                                $set: {
+                                    progressStatus: `Rate limit hit ("Asking too fast"). Cooling down 25s before retry ${retryCount}/4...`,
+                                    updatedAt: new Date(),
+                                }
+                            }
+                        );
+                    } catch (e) {}
+                }
+                await page.waitForTimeout(25000);
+
+                // Auto-click the "Try again" button in the chat bubble
+                const clickedTryAgain = await page.evaluate(() => {
+                    const btn = Array.from(document.querySelectorAll('button')).find(b =>
+                        b.offsetWidth > 0 && (b.innerText || b.textContent || '').trim().toLowerCase() === 'try again'
+                    );
+                    if (btn) {
+                        btn.click();
+                        return true;
+                    }
+                    return false;
+                });
+                if (clickedTryAgain) {
+                    console.log(`      🖱️ Clicked "Try again" button after 25s cooldown.`);
+                } else {
+                    console.log(`      🔄 "Try again" button not found — resubmitting prompt...`);
+                    await this._resubmitPromptForRetry(page);
+                }
+                await page.waitForTimeout(4000);
+                lastActivityTime = Date.now();
+                stuckProgressCount = 0;
+                lastProgressPct = -1;
+                continue;
+            }
 
             // ── GOOGLE ERROR CHECK: "Something went wrong" / "The agent failed" / "Rendering failure" ──
             // Only trigger on VISIBLE "Try again" button — NOT on chat text containing those words
@@ -2965,22 +3019,28 @@ export class GoogleFxFlowTool extends BaseTool {
                 console.log(`      🔄 Google error retry ${retryCount}/3 — restoring state and re-submitting...`);
 
                 // Auto-click the "Try again" button to reset the error state
-                await page.evaluate(() => {
+                const clicked = await page.evaluate(() => {
                     const btn = Array.from(document.querySelectorAll('button')).find(b =>
                         b.offsetWidth > 0 && (b.innerText || b.textContent || '').trim().toLowerCase() === 'try again'
                     );
-                    if (btn) btn.click();
+                    if (btn) {
+                        btn.click();
+                        return true;
+                    }
+                    return false;
                 });
                 console.log(`      🖱️ Clicked "Try again" button.`);
-                await page.waitForTimeout(3000);
+                await page.waitForTimeout(4000);
 
                 stuckProgressCount = 0;
                 lastProgressPct = -1;
-                const resubmitted = await this._resubmitPromptForRetry(page);
-                if (resubmitted) {
-                    lastActivityTime = Date.now();
-                    continue;
+
+                // ONLY resubmit if Try again button wasn't clicked
+                if (!clicked) {
+                    await this._resubmitPromptForRetry(page);
                 }
+                lastActivityTime = Date.now();
+                continue;
             }
 
             // ── CANCELLATION CHECK: if Google cancelled the response, retry the prompt ──
