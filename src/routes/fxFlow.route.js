@@ -29,7 +29,9 @@ const generateAvatarSchema = Joi.object({
         server: Joi.string().optional().allow(null, ''),
         username: Joi.string().optional().allow(null, ''),
         password: Joi.string().optional().allow(null, ''),
-    }).optional().allow(null),
+        proxyId: Joi.string().optional().allow(null, ''),
+        countryCode: Joi.string().optional().allow(null, ''),
+    }).unknown(true).optional().allow(null),
 }).unknown(true);
 
 /**
