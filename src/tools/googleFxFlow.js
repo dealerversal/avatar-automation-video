@@ -88,6 +88,9 @@ export async function safeEvaluate(page, fn, ...args) {
 
 
 export class GoogleFxFlowTool extends BaseTool {
+    // Static property: tracks current proxy so browser context restarts on proxy change
+    static _activeProxy = null;
+
     get name() {
         return 'google_fx_flow';
     }
@@ -193,6 +196,20 @@ export class GoogleFxFlowTool extends BaseTool {
                 userAgent:
                     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36',
             };
+
+            // ── Inject Webshare proxy into Playwright if provided ──
+            // proxyConfig = { server: 'http://host:port', username: '...', password: '...' }
+            if (GoogleFxFlowTool._activeProxy && GoogleFxFlowTool._activeProxy.server) {
+                launchOptions.proxy = {
+                    server: GoogleFxFlowTool._activeProxy.server,
+                    username: GoogleFxFlowTool._activeProxy.username || undefined,
+                    password: GoogleFxFlowTool._activeProxy.password || undefined,
+                };
+                logger.info(`[🌐 GoogleFX] Launching Playwright with proxy: ${GoogleFxFlowTool._activeProxy.server}`);
+                console.log(`🌐 [GoogleFX] Proxy injected into Playwright: ${GoogleFxFlowTool._activeProxy.server}`);
+            } else {
+                console.log(`🔗 [GoogleFX] No proxy — launching Playwright with direct VPS IP`);
+            }
 
             try {
                 sharedContext = await chromium.launchPersistentContext(profileDir, {
@@ -329,12 +346,26 @@ export class GoogleFxFlowTool extends BaseTool {
         return str;
     }
 
-    async execute({ itemId, prompt, type = 'video', settings = {}, mediaUrl = null, imageUrl = null, avatarName = null }) {
+    async execute({ itemId, prompt, type = 'video', settings = {}, mediaUrl = null, imageUrl = null, avatarName = null, proxy = null }) {
         const cleanPrompt = this._cleanPromptText(prompt);
         const effectiveMediaUrl = mediaUrl || imageUrl || null;
         const effectiveAvatarName = avatarName || (type === 'avatar_video' ? 'me' : null);
         const actualGenType = type === 'avatar_video' ? 'video' : type;
         const execStart = Date.now();
+
+        // ── Proxy handling: if proxy changed, force close existing context ─────────────────────
+        // This ensures a fresh Playwright browser is launched with the new proxy
+        const newProxyServer = proxy?.server || null;
+        const activeProxyServer = GoogleFxFlowTool._activeProxy?.server || null;
+        if (newProxyServer !== activeProxyServer) {
+            if (sharedContext) {
+                logger.info(`[🌐 GoogleFX] Proxy changed (${activeProxyServer || 'none'} → ${newProxyServer || 'none'}) — closing browser context for fresh launch`);
+                console.log(`🔄 [GoogleFX] Proxy changed — closing existing browser context to launch with new proxy...`);
+                await closeSharedContext();
+            }
+            GoogleFxFlowTool._activeProxy = proxy ? { ...proxy } : null;
+        }
+
         console.log('\n' + '─'.repeat(60));
         console.log('🌐  [GoogleFxFlowTool] BROWSER AUTOMATION STARTED');
         console.log('─'.repeat(60));

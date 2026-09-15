@@ -34,6 +34,7 @@ class GenerationQueue {
         const currentJobData = this.queue.shift();
         const { itemId, type, prompt, settings, avatarName } = currentJobData;
         const mediaUrl = currentJobData.mediaUrl || currentJobData.imageUrl || null;
+        const proxy = currentJobData.proxy || null; // Webshare proxy config (may be null = direct)
 
         console.log('\n' + '═'.repeat(60));
         console.log(`⚙️  [Queue Worker] Processing Scene Creation Job: ${itemId}`);
@@ -62,7 +63,7 @@ class GenerationQueue {
 
             // Get automation tool
             const tool = registry.getTool('google_fx_flow');
-            const result = await tool.execute({ itemId, prompt, type, settings, mediaUrl, imageUrl: mediaUrl, avatarName });
+            const result = await tool.execute({ itemId, prompt, type, settings, mediaUrl, imageUrl: mediaUrl, avatarName, proxy });
 
             const durationMs = Date.now() - startTime;
             const isVideoType = type === 'video' || type === 'avatar_video';
@@ -149,6 +150,7 @@ class GenerationQueue {
                     this.addJob({
                         ...currentJobData,
                         retryCount: nextRetryCount,
+                        // proxy remains the same for retries — avatar VPS side handles retry with fresh browser
                     });
                 }
             } else {

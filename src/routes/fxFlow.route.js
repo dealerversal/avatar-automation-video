@@ -25,6 +25,11 @@ const generateAvatarSchema = Joi.object({
     imageUrl: Joi.string().uri().optional().allow(null, '').messages({
         'string.uri': 'imageUrl must be a valid URL',
     }),
+    proxy: Joi.object({
+        server: Joi.string().optional().allow(null, ''),
+        username: Joi.string().optional().allow(null, ''),
+        password: Joi.string().optional().allow(null, ''),
+    }).optional().allow(null),
 }).unknown(true);
 
 /**
@@ -55,6 +60,7 @@ const handleGenerateAvatarVideo = async (req, res) => {
     const type = value.type || 'avatar_video';
     const avatarName = value.avatarName || 'me';
     const mediaUrl = value.mediaUrl || value.imageUrl || null;
+    const proxy = value.proxy || null; // Webshare proxy config { server, username, password }
     const itemId = `gen_${uuidv4().replace(/-/g, '').substring(0, 12)}`;
 
     console.log('\n' + '📥 '.repeat(25));
@@ -111,6 +117,7 @@ const handleGenerateAvatarVideo = async (req, res) => {
             imageUrl: mediaUrl,
             avatarName,
             retryCount: 0,
+            proxy, // forwarded to Playwright launchOptions
         });
 
         return res.status(202).json({
