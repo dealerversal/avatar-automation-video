@@ -355,9 +355,21 @@ export class GoogleFxFlowTool extends BaseTool {
         const actualGenType = type === 'avatar_video' ? 'video' : type;
         const execStart = Date.now();
 
-        // ── Proxy handling: if proxy changed, force close existing context ─────────────────────
-        // This ensures a fresh Playwright browser is launched with the new proxy
-        const newProxyServer = proxy?.server || null;
+        // ── Proxy handling: if proxy not provided, load from DB; if changed, restart context ──
+        let effectiveProxy = proxy;
+        if (!effectiveProxy || !effectiveProxy.server) {
+            try {
+                const { getActiveProxyFromDB } = await import('../db.js');
+                effectiveProxy = await getActiveProxyFromDB();
+                if (effectiveProxy) {
+                    console.log(`🌐 [GoogleFX] Loaded active proxy dynamically from DB: ${effectiveProxy.displayHost || effectiveProxy.server}`);
+                }
+            } catch (e) {
+                console.warn(`⚠️ [GoogleFX] Could not load proxy from DB: ${e.message}`);
+            }
+        }
+
+        const newProxyServer = effectiveProxy?.server || null;
         const activeProxyServer = GoogleFxFlowTool._activeProxy?.server || null;
         if (newProxyServer !== activeProxyServer) {
             if (sharedContext) {
@@ -365,7 +377,7 @@ export class GoogleFxFlowTool extends BaseTool {
                 console.log(`🔄 [GoogleFX] Proxy changed — closing existing browser context to launch with new proxy...`);
                 await closeSharedContext();
             }
-            GoogleFxFlowTool._activeProxy = proxy ? { ...proxy } : null;
+            GoogleFxFlowTool._activeProxy = effectiveProxy ? { ...effectiveProxy } : null;
         }
 
         console.log('\n' + '─'.repeat(60));

@@ -55,3 +55,27 @@ export function getJobsCollection() {
 export function getAvatarInstancesCollection() {
     return getDB().collection('avatar_instances');
 }
+
+export async function getActiveProxyFromDB() {
+    try {
+        const db = getDB();
+        const proxies = await db.collection('system_proxies').find({ enabled: true }).toArray();
+        if (!proxies || proxies.length === 0) return null;
+        const proxy = proxies[Math.floor(Math.random() * proxies.length)];
+        const server = (proxy.source === 'webshare' || proxy.webshareId || proxy.port >= 10000)
+            ? `http://p.webshare.io:${proxy.port}`
+            : `http://${proxy.host}:${proxy.port}`;
+        return {
+            server,
+            username: proxy.username || '',
+            password: proxy.password || '',
+            proxyId: proxy._id?.toString(),
+            countryCode: proxy.countryCode || '',
+            displayHost: `${proxy.host}:${proxy.port}`,
+        };
+    } catch (err) {
+        logger.warn(`[DB] Could not load proxy from DB: ${err.message}`);
+        return null;
+    }
+}
+
