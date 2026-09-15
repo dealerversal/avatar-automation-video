@@ -12,7 +12,7 @@ import { uploadToR2 } from '../services/r2Service.js';
 import { getJobsCollection } from '../db.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const GOOGLE_FX_URL = 'https://labs.google/fx/tools/flow';
+const GOOGLE_FX_URL = 'https://flow.google.com/';
 
 let sharedContext = null;
 let isInitializing = false;
@@ -398,7 +398,8 @@ export class GoogleFxFlowTool extends BaseTool {
 
             // 1. Navigate to Google FX Flow
             console.log(`\n[2/6] 🌍 Navigating to ${GOOGLE_FX_URL} ...`);
-            await page.goto(GOOGLE_FX_URL, { waitUntil: 'domcontentloaded', timeout: config.browser.timeoutMs });
+            await page.goto(GOOGLE_FX_URL, { waitUntil: 'commit', timeout: config.browser.timeoutMs });
+            await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {});
             await page.waitForTimeout(2500);
             await this._dismissOverlays(page);
             const currentUrl = page.url();
@@ -623,8 +624,9 @@ export class GoogleFxFlowTool extends BaseTool {
 
     async _createNewProject(page) {
         // If not on main lander, navigate to GOOGLE_FX_URL first to locate New Project button
-        if (!page.url().includes('labs.google/fx/tools/flow')) {
-            await page.goto(GOOGLE_FX_URL, { waitUntil: 'domcontentloaded', timeout: config.browser.timeoutMs });
+        if (!page.url().includes('flow.google.com') && !page.url().includes('labs.google/fx/tools/flow')) {
+            await page.goto(GOOGLE_FX_URL, { waitUntil: 'commit', timeout: config.browser.timeoutMs });
+            await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {});
             await page.waitForTimeout(2000);
         }
 
