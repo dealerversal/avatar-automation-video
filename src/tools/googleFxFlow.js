@@ -191,6 +191,8 @@ export class GoogleFxFlowTool extends BaseTool {
                     '--disable-background-timer-throttling',
                     '--disable-backgrounding-occluded-windows',
                     '--disable-renderer-backgrounding',
+                    '--disable-http2',
+                    '--disable-quic',
                 ],
                 viewport: { width: 1280, height: 800 },
                 userAgent:
