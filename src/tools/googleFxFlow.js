@@ -3025,9 +3025,14 @@ export class GoogleFxFlowTool extends BaseTool {
                     }
 
                     // ── Increment stuck counter on every poll tick if progress >= 90% and not completed ──
-                    if (effectivePct >= 95 || (effectivePct === lastProgressPct && effectivePct >= 90)) {
+                    // Only count as stuck if spinner/generating text is no longer active (DOM idle/hung),
+                    // or if total generation time has exceeded 4 minutes (240s)
+                    if (!liveState.hasActiveSpinner && !liveState.isGeneratingText && (effectivePct >= 95 || (effectivePct === lastProgressPct && effectivePct >= 90))) {
                         stuckProgressCount++;
-                        console.log(`      ⏳ Generation holding at ${effectivePct}% [stuck check ${stuckProgressCount}/10] (${elapsedSec}s)`);
+                        console.log(`      ⏳ Generation holding at ${effectivePct}% [stuck check ${stuckProgressCount}/30] (${elapsedSec}s)`);
+                    } else if (elapsedSec > 240) {
+                        stuckProgressCount++;
+                        console.log(`      ⏳ Generation exceeded 240s [stuck check ${stuckProgressCount}/30] (${elapsedSec}s)`);
                     } else {
                         stuckProgressCount = 0;
                     }
@@ -3036,14 +3041,14 @@ export class GoogleFxFlowTool extends BaseTool {
                     lastActivityTime = Date.now();
                 }
             } else {
-                if (elapsedSec > 30) {
+                if (elapsedSec > 180) {
                     stuckProgressCount++;
                 }
             }
 
-            // ── STUCK AT 95% PROGRESS CHECK: if stuck count >= 10, mark as failed & retry prompt ──
-            if (stuckProgressCount >= 10) {
-                console.warn(`      ⚠️ Generation progress stuck at ${effectivePct || 95}% ${liveState.statusText ? `(${liveState.statusText})` : ''} for 10 checks (~50s) — generation stalled/failed. Triggering instant retry...`);
+            // ── STUCK AT 95% PROGRESS CHECK: if stuck count >= 30, mark as failed & retry prompt ──
+            if (stuckProgressCount >= 30) {
+                console.warn(`      ⚠️ Generation progress stuck at ${effectivePct || 95}% ${liveState.statusText ? `(${liveState.statusText})` : ''} for 30 checks (~150s) — generation stalled/failed. Triggering instant retry...`);
                 retryCount = (retryCount || 0) + 1;
                 if (retryCount > 3) {
                     throw new Error(`[GoogleFX] ❌ Generation stuck at ${effectivePct || 95}% repeated 3 times — aborting.`);
