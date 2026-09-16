@@ -1,7 +1,7 @@
 module.exports = {
     apps: [
         {
-            name: 'video-gen.dealerversal.com',
+            name: process.env.PM2_APP_NAME || 'video-gen.dealerversal.com',
             script: 'src/gateway.js',
             cwd: '/root/projects/avatar-automation-video',
             instances: 1,

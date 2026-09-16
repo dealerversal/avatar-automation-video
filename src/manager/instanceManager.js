@@ -143,6 +143,8 @@ export async function createOrProvisionInstance({
     fs.mkdirSync(profileDir, { recursive: true });
     fs.mkdirSync(downloadsDir, { recursive: true });
 
+    const publicBaseUrl = process.env.PUBLIC_SERVICE_URL || 'https://video-gen.dealerversal.com';
+
     // 2. Write dedicated .env for this instance
     const envContent = [
         `PORT=${assignedPort}`,
@@ -151,6 +153,7 @@ export async function createOrProvisionInstance({
         `AVATAR_NAME=${avatarName || 'me'}`,
         `PROFILE_DIR=${profileDir}`,
         `DOWNLOADS_DIR=${downloadsDir}`,
+        `PUBLIC_SERVICE_URL=${publicBaseUrl}`,
         `MONGODB_URI=${config.mongodbUri}`,
         `MONGODB_NAME=${config.mongodbName}`,
         `JWT_SECRET=${config.jwtSecret}`,
@@ -206,7 +209,6 @@ export async function createOrProvisionInstance({
         );
     }
 
-    const publicBaseUrl = process.env.PUBLIC_SERVICE_URL || 'https://video-gen.dealerversal.com';
     const instanceDoc = {
         instanceId: cleanInstanceId,
         userId: userId ? String(userId) : existing?.userId || null,

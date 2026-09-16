@@ -1,4 +1,4 @@
-name: Deploy Avatar Automation Video working
+name: Deploy Avatar Automation Video to Dual VPS
 
 on:
   push:
@@ -12,12 +12,26 @@ concurrency:
 
 jobs:
   deploy:
+    name: Deploy to ${{ matrix.server.name }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        server:
+          - name: dvnew
+            host: 2.24.75.236
+            process_name: video-gen.dealerversal.com
+            public_url: https://video-gen.dealerversal.com
+          - name: dealerversal
+            host: 72.60.118.141
+            process_name: video-gen-2.dealerversal.com
+            public_url: https://video-gen-2.dealerversal.com
     env:
-      HOST: 2.24.75.236
+      HOST: ${{ matrix.server.host }}
       USER: root
       PROJECT_PATH: /root/projects/avatar-automation-video
-      PROCESS_NAME: video-gen.dealerversal.com
+      PROCESS_NAME: ${{ matrix.server.process_name }}
+      PUBLIC_SERVICE_URL: ${{ matrix.server.public_url }}
 
     steps:
       - name: Set up SSH keys
@@ -31,6 +45,11 @@ jobs:
       - name: Create .env file
         run: |
           echo "${{ secrets.ENV_FILE }}" > .env
+          # Customize server-specific environment variables for this target node
+          sed -i '/^PM2_APP_NAME=/d' .env || true
+          sed -i '/^PUBLIC_SERVICE_URL=/d' .env || true
+          echo "PM2_APP_NAME=${{ matrix.server.process_name }}" >> .env
+          echo "PUBLIC_SERVICE_URL=${{ matrix.server.public_url }}" >> .env
           echo "Verified .env file contents (keys only for security):"
           grep -v '^#' .env | grep '=' | cut -d= -f1
 
@@ -39,7 +58,7 @@ jobs:
           mkdir -p ~/.ssh
           
           # Setup SSH ControlMaster for multiplexing (reuses a single TCP connection)
-          echo "Establishing SSH Master connection..."
+          echo "Establishing SSH Master connection to ${{ matrix.server.name }} (${{ env.HOST }})..."
           ssh -M -S ~/.ssh/control_socket -fnN -o StrictHostKeyChecking=no ${{ env.USER }}@${{ env.HOST }}
           
           # Setup exit trap to close the multiplexed socket when the job completes
@@ -54,7 +73,7 @@ jobs:
           --exclude='.git' --exclude='.github' --exclude='node_modules' --exclude='browser-profile' --exclude='logs' \
           ./ ${{ env.USER }}@${{ env.HOST }}:${{ env.PROJECT_PATH }}
 
-          echo "Running remote deployment commands..."
+          echo "Running remote deployment commands on ${{ matrix.server.name }}..."
           ssh -S ~/.ssh/control_socket ${{ env.USER }}@${{ env.HOST }} "
             set -e
             # Install Node.js if not already installed
@@ -74,14 +93,13 @@ jobs:
             # Install Playwright browser dependencies if needed
             npx playwright install chromium --with-deps || true
 
-            # Restart the application using ecosystem config
-            # We delete first to ensure a clean start with new config/env
+            # Restart the application using ecosystem config with server-specific process name
             if pm2 show ${{ env.PROCESS_NAME }} > /dev/null 2>&1; then
               pm2 delete ${{ env.PROCESS_NAME }}
             fi
-            pm2 start ecosystem.config.cjs --env production
+            PM2_APP_NAME=${{ env.PROCESS_NAME }} PUBLIC_SERVICE_URL=${{ env.PUBLIC_SERVICE_URL }} pm2 start ecosystem.config.cjs --env production
 
-            # Propagate codebase updates to all cloned avatar instance workspaces
+            # Propagate codebase updates to all cloned avatar instance workspaces on this VPS
             node scripts/sync-all-instances.js || true
 
             pm2 save
