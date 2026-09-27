@@ -348,10 +348,10 @@ export class GoogleFxFlowTool extends BaseTool {
         return str;
     }
 
-    async execute({ itemId, prompt, type = 'video', settings = {}, mediaUrl = null, imageUrl = null, avatarName = null, proxy = null }) {
+    async execute({ itemId, prompt, type = 'avatar_video', settings = {}, mediaUrl = null, imageUrl = null, avatarName = null, proxy = null }) {
         const cleanPrompt = this._cleanPromptText(prompt);
         const effectiveMediaUrl = mediaUrl || imageUrl || null;
-        const effectiveAvatarName = avatarName || (type === 'avatar_video' ? 'me' : null);
+        const effectiveAvatarName = (avatarName && String(avatarName).trim()) || 'me';
         const actualGenType = type === 'avatar_video' ? 'video' : type;
         const execStart = Date.now();
 
@@ -387,7 +387,7 @@ export class GoogleFxFlowTool extends BaseTool {
         console.log(`🎬  Type        : ${type.toUpperCase()}`);
         console.log(`⚙️   Settings    : ${JSON.stringify(settings, null, 2)}`);
         if (effectiveMediaUrl) console.log(`🖼️   Media URL   : ${effectiveMediaUrl}`);
-        if (effectiveAvatarName) console.log(`👤  Avatar Name : ${effectiveAvatarName}`);
+        console.log(`👤  Avatar Name : ${effectiveAvatarName} (REQUIRED)`);
         console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
         console.log(`💬  EXACT FULL PROMPT TO BE SUBMITTED INTO BROWSER (${cleanPrompt.length} chars):`);
         console.log(cleanPrompt);
@@ -481,15 +481,13 @@ export class GoogleFxFlowTool extends BaseTool {
                         await page.waitForTimeout(800);
                     }
 
-                    // 4. Add account Avatar to prompt
-                    if (effectiveAvatarName) {
-                        this._lastAvatarName = effectiveAvatarName;
-                        console.log(`\n[4/7] 🔲 Ensuring session drawer is open before avatar selection... (attempt ${uploadAttempt})`);
-                        await this._clickExpandButton(page);
-                        await page.waitForTimeout(500);
-                        console.log(`      👤 [STEP 1/2] Selecting Avatar "${effectiveAvatarName}" and adding to prompt...`);
-                        await this._addAvatarToPrompt(page, effectiveAvatarName);
-                    }
+                    // 4. Add account Avatar to prompt (MANDATORY & REQUIRED)
+                    this._lastAvatarName = effectiveAvatarName;
+                    console.log(`\n[4/7] 🔲 Ensuring session drawer is open before avatar selection... (attempt ${uploadAttempt})`);
+                    await this._clickExpandButton(page);
+                    await page.waitForTimeout(500);
+                    console.log(`      👤 [STEP 1/2] Selecting Avatar "${effectiveAvatarName}" and adding to prompt (REQUIRED)...`);
+                    await this._addAvatarToPrompt(page, effectiveAvatarName);
 
                     // 5. Upload reference image/media to prompt (RULE: Upload strictly ONCE per project)
                     if (effectiveMediaUrl) {
@@ -2440,32 +2438,114 @@ export class GoogleFxFlowTool extends BaseTool {
      * 5. If avatar not pre-selected: click "Avatar" sidebar tab → card appears → "Add to Prompt" shows
      * 6. Click "Add to Prompt" → avatar thumbnail appears in prompt bar
      */
+    /**
+     * Opens media panel, navigates to "Avatar" tab, selects the avatar card, clicks "Add to Prompt",
+     * and strictly verifies that the avatar is attached to the prompt bar.
+     */
     async _addAvatarToPrompt(page, avatarName = 'me') {
-        console.log(`\n[Avatar] 👤 Adding Avatar "${avatarName}" to prompt...`);
+        const targetAvatar = (avatarName && String(avatarName).trim()) || 'me';
+        console.log(`\n[Avatar] 👤 Adding Avatar "${targetAvatar}" to prompt (REQUIRED)...`);
+
+        // Check if avatar is ALREADY attached in prompt bar
+        const isAlreadyAttached = await page.evaluate(() => {
+            const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+            const promptArea = Array.from(document.querySelectorAll('[role="textbox"], [contenteditable="true"], textarea'))
+                .find(el => isVisible(el) && el.getBoundingClientRect().left > window.innerWidth * 0.4);
+            if (!promptArea) return false;
+            let container = promptArea.parentElement;
+            for (let i = 0; i < 8 && container; i++) {
+                const chips = container.querySelectorAll('img, [role="button"], [class*="chip"], [class*="attachment"]');
+                if (chips.length > 0) return true;
+                container = container.parentElement;
+            }
+            return false;
+        });
+
+        if (isAlreadyAttached) {
+            console.log(`      ✅ Avatar is already attached to prompt bar!`);
+            return;
+        }
 
         // Step 1: Open the Media Drawer
         const panelOpened = await this._openMediaPanel(page);
         if (!panelOpened) {
             throw new Error('[GoogleFX] ❌ Could not open media drawer for Avatar selection.');
         }
-        await page.waitForTimeout(1500);
+        await page.waitForTimeout(1000);
 
-        // Step 2: Check if "Add to Prompt" button is ALREADY visible (avatar pre-selected on panel open)
-        // This is the common case — the last-used avatar is auto-selected.
-        // We try clicking it directly WITHOUT clicking the card (which would toggle/deselect).
-        console.log(`      🎯 Checking if "Add to Prompt" is already visible (pre-selected avatar)...`);
+        // Step 2: Ensure "Avatar" tab is selected in the sidebar
+        console.log(`      📂 Switching to "Avatar" tab in sidebar...`);
+        let avatarTabFound = false;
 
+        for (let tabAttempt = 1; tabAttempt <= 6; tabAttempt++) {
+            const tabCoords = await page.evaluate(() => {
+                const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+                const candidates = Array.from(document.querySelectorAll('button, [role="tab"], [role="option"], [role="listitem"], li, div, span'));
+
+                // Search for tab with exact or close match for "Avatar" or "Avatars"
+                const tab = candidates.find(el => {
+                    if (!isVisible(el)) return false;
+                    const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
+                    const isAvatarTab = txt === 'avatar' || txt === 'avatars' ||
+                        txt.startsWith('avatar\n') || txt.endsWith('\navatar') ||
+                        txt.includes('person\navatar') || txt.includes('account_circle\navatar');
+                    if (!isAvatarTab && txt !== 'avatar') return false;
+
+                    const r = el.getBoundingClientRect();
+                    return r.width > 20 && r.height > 15 && r.width < 400 && r.height < 100;
+                });
+
+                if (tab) {
+                    const isSelected = tab.getAttribute('aria-selected') === 'true' ||
+                        tab.getAttribute('data-selected') === 'true' ||
+                        (tab.className || '').includes('active') ||
+                        (tab.className || '').includes('selected');
+                    const r = tab.getBoundingClientRect();
+                    return {
+                        cx: Math.round(r.left + r.width / 2),
+                        cy: Math.round(r.top + r.height / 2),
+                        isSelected,
+                    };
+                }
+                return null;
+            });
+
+            if (tabCoords) {
+                if (tabCoords.isSelected) {
+                    console.log(`      ✅ "Avatar" tab is already active`);
+                    avatarTabFound = true;
+                    break;
+                }
+                console.log(`      🖱️ Clicking "Avatar" tab at [${tabCoords.cx}, ${tabCoords.cy}] (attempt ${tabAttempt}/6)...`);
+                try {
+                    await page.mouse.click(tabCoords.cx, tabCoords.cy);
+                } catch {
+                    await page.evaluate((c) => {
+                        const el = document.elementFromPoint(c.cx, c.cy);
+                        if (el) el.click();
+                    }, tabCoords);
+                }
+                await page.waitForTimeout(1200);
+                avatarTabFound = true;
+                break;
+            }
+
+            console.warn(`      ⚠️ "Avatar" tab not located yet (attempt ${tabAttempt}/6)...`);
+            await page.waitForTimeout(700);
+        }
+
+        // Step 3: Ensure Avatar card is selected and "Add to Prompt" is clicked
+        console.log(`      📌 Ensuring avatar card "${targetAvatar}" is selected...`);
         let addToPromptClicked = false;
 
-        for (let attempt = 1; attempt <= 8; attempt++) {
-            const addBtnCoords = await page.evaluate(() => {
+        for (let selectAttempt = 1; selectAttempt <= 8; selectAttempt++) {
+            // Check if "Add to Prompt" is already showing
+            const addBtn = await page.evaluate(() => {
                 const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
-                // Find "Add to Prompt" button in the RIGHT preview panel area (x > 50% of viewport)
                 const btn = Array.from(document.querySelectorAll('button')).find(b => {
                     if (!isVisible(b)) return false;
-                    const txt = (b.innerText || b.textContent || '').trim();
-                    // Use includes() not exact match — button may have icon chars appended
-                    return txt.includes('Add to Prompt') || txt.toLowerCase().includes('add to prompt');
+                    const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
+                    return txt === 'add to prompt' || txt.includes('add to prompt');
                 });
                 if (btn) {
                     const r = btn.getBoundingClientRect();
@@ -2474,91 +2554,134 @@ export class GoogleFxFlowTool extends BaseTool {
                 return null;
             });
 
-            if (addBtnCoords) {
-                console.log(`      ✅ "Add to Prompt" found at [${addBtnCoords.cx}, ${addBtnCoords.cy}] (attempt ${attempt}/8)`);
-                console.log(`      🖱️ Clicking "Add to Prompt"...`);
-                try { await page.mouse.click(addBtnCoords.cx, addBtnCoords.cy); } catch {}
+            if (addBtn) {
+                console.log(`      ✅ "Add to Prompt" button found at [${addBtn.cx}, ${addBtn.cy}]! Clicking...`);
+                try {
+                    await page.mouse.click(addBtn.cx, addBtn.cy);
+                } catch {
+                    await page.evaluate((c) => {
+                        const el = document.elementFromPoint(c.cx, c.cy);
+                        if (el) el.click();
+                    }, addBtn);
+                }
                 addToPromptClicked = true;
+                await page.waitForTimeout(1500);
                 break;
             }
 
-            // If not found yet:
-            if (attempt === 1) {
-                // On first miss: click the "Avatar" sidebar tab to ensure avatar card is in view
-                console.log(`      ↩️ "Add to Prompt" not visible — clicking "Avatar" sidebar tab...`);
-                await page.evaluate(() => {
-                    const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
-                    // Sidebar tab buttons: text "Avatar" (NOT the card), located in the LEFT sidebar (x < 55% of viewport)
-                    const avatarTab = Array.from(document.querySelectorAll('button, [role="tab"], [role="option"], li, [role="listitem"]')).find(el => {
-                        if (!isVisible(el)) return false;
-                        const r = el.getBoundingClientRect();
-                        // Must be in left sidebar zone (x < 57% viewport) to avoid clicking the card itself
-                        if (r.left > window.innerWidth * 0.57) return false;
-                        const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
-                        return txt === 'avatar';
-                    });
-                    if (avatarTab) avatarTab.click();
+            // "Add to Prompt" not yet visible -> locate and click the avatar card
+            console.log(`      🔍 Searching for avatar card to select (attempt ${selectAttempt}/8)...`);
+            const cardCoords = await page.evaluate((targetName) => {
+                const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+                const candidates = Array.from(document.querySelectorAll('[role="option"], [role="listitem"], [data-card], [class*="card"], [class*="asset"], [role="button"]'));
+
+                // 1. First search for card with text matching targetName (e.g. 'me')
+                let card = candidates.find(el => {
+                    if (!isVisible(el)) return false;
+                    const r = el.getBoundingClientRect();
+                    if (r.width < 35 || r.height < 35) return false;
+                    const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
+                    if (txt === 'avatar' || txt === 'uploads' || txt === 'all' || txt === 'images') return false;
+                    return txt.includes(targetName.toLowerCase());
                 });
-                await page.waitForTimeout(1200);
-                continue;
-            }
 
-            if (attempt === 3) {
-                // On third miss: click the avatar CARD in the center panel to select it
-                // Only if the card is in the CENTER area (x: 57%-80% of viewport) to avoid clicking sidebar
-                console.log(`      📌 Clicking avatar card to select it...`);
-                const cardCoords = await page.evaluate((targetName) => {
-                    const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
-                    // The avatar card is in the CENTER of the panel (x: 57%-80% of viewport)
-                    // Sidebar tabs end at ~57% viewport width; right preview starts at ~72%
-                    let card = Array.from(document.querySelectorAll('[role="option"]')).find(el => {
+                // 2. Fallback: First visible card with role="option" or image inside media panel
+                if (!card) {
+                    card = candidates.find(el => {
                         if (!isVisible(el)) return false;
                         const r = el.getBoundingClientRect();
-                        // Card must be in center panel zone (NOT sidebar, NOT right preview)
-                        if (r.left < window.innerWidth * 0.57) return false;
-                        if (r.left > window.innerWidth * 0.80) return false;
+                        if (r.width < 35 || r.height < 35) return false;
                         const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
-                        return txt.includes(targetName.toLowerCase());
+                        if (['avatar', 'uploads', 'images', 'videos', 'voices', 'characters', 'all'].includes(txt)) return false;
+                        return el.getAttribute('role') === 'option' || !!el.querySelector('img');
                     });
-                    // Fallback: any [role="option"] in center zone
-                    if (!card) {
-                        card = Array.from(document.querySelectorAll('[role="option"]')).find(el => {
-                            if (!isVisible(el)) return false;
-                            const r = el.getBoundingClientRect();
-                            return r.left >= window.innerWidth * 0.57 && r.left <= window.innerWidth * 0.80 && r.top > 50;
-                        });
-                    }
-                    if (card) {
-                        const r = card.getBoundingClientRect();
-                        return {
-                            cx: Math.round(r.left + r.width / 2),
-                            cy: Math.round(r.top + r.height / 2),
-                            text: (card.innerText || card.textContent || '').trim().substring(0, 40),
-                        };
-                    }
-                    return null;
-                }, avatarName);
-
-                if (cardCoords) {
-                    console.log(`      🖱️ Clicking avatar card "${cardCoords.text}" at [${cardCoords.cx}, ${cardCoords.cy}]`);
-                    try { await page.mouse.click(cardCoords.cx, cardCoords.cy); } catch {}
-                    await page.waitForTimeout(1200);
-                } else {
-                    console.warn(`      ⚠️ Avatar card not found in center panel zone`);
                 }
-                continue;
-            }
 
-            console.warn(`      ⚠️ "Add to Prompt" button not visible yet (attempt ${attempt}/8)...`);
-            await page.waitForTimeout(700);
+                // 3. Fallback: any [role="option"]
+                if (!card) {
+                    card = Array.from(document.querySelectorAll('[role="option"]')).find(el => isVisible(el));
+                }
+
+                if (card) {
+                    const r = card.getBoundingClientRect();
+                    return {
+                        cx: Math.round(r.left + r.width / 2),
+                        cy: Math.round(r.top + r.height / 2),
+                        text: (card.innerText || card.textContent || '').trim().substring(0, 30),
+                    };
+                }
+                return null;
+            }, targetAvatar);
+
+            if (cardCoords) {
+                console.log(`      🖱️ Clicking avatar card "${cardCoords.text}" at [${cardCoords.cx}, ${cardCoords.cy}]...`);
+                try {
+                    await page.mouse.click(cardCoords.cx, cardCoords.cy);
+                } catch {
+                    await page.evaluate((c) => {
+                        const el = document.elementFromPoint(c.cx, c.cy);
+                        if (el) el.click();
+                    }, cardCoords);
+                }
+                await page.waitForTimeout(1200);
+            } else {
+                console.warn(`      ⚠️ Avatar card not located yet (attempt ${selectAttempt}/8)...`);
+                await page.waitForTimeout(800);
+            }
         }
 
         if (!addToPromptClicked) {
-            throw new Error(`[GoogleFX] ❌ Could not click "Add to Prompt" for Avatar "${avatarName}" after 8 attempts.`);
+            throw new Error(`[GoogleFX] ❌ Could not click "Add to Prompt" for Avatar "${targetAvatar}". Avatar selection is REQUIRED.`);
         }
 
-        await page.waitForTimeout(2000);
-        console.log(`      ✨ Avatar "${avatarName}" successfully added to prompt bar!`);
+        // Step 4: Verify avatar attachment in prompt bar
+        console.log(`      🔍 Verifying avatar attachment in prompt bar...`);
+        let attached = false;
+        for (let verifyAttempt = 1; verifyAttempt <= 10; verifyAttempt++) {
+            attached = await page.evaluate(() => {
+                const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+                // Check 1: Image chips inside prompt input container
+                const promptArea = Array.from(document.querySelectorAll('[role="textbox"], [contenteditable="true"], textarea'))
+                    .find(el => isVisible(el) && el.getBoundingClientRect().left > window.innerWidth * 0.4);
+                if (promptArea) {
+                    let container = promptArea.parentElement;
+                    for (let i = 0; i < 8 && container; i++) {
+                        const imgs = container.querySelectorAll('img');
+                        if (imgs.length > 0) return true;
+                        const chips = container.querySelectorAll('[role="button"], [class*="chip"], [class*="attachment"]');
+                        if (chips.length > 0) return true;
+                        container = container.parentElement;
+                    }
+                }
+                // Check 2: Any image element in the right bottom prompt area
+                const promptImgs = Array.from(document.querySelectorAll('img')).filter(img => {
+                    if (!isVisible(img)) return false;
+                    const r = img.getBoundingClientRect();
+                    return r.left > window.innerWidth * 0.5 && r.top > window.innerHeight * 0.4;
+                });
+                if (promptImgs.length > 0) return true;
+
+                // Check 3: "Add to Prompt" is gone and prompt textarea is visible
+                const addBtnVisible = Array.from(document.querySelectorAll('button')).some(b => {
+                    if (!isVisible(b)) return false;
+                    const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
+                    return txt.includes('add to prompt');
+                });
+                return !addBtnVisible;
+            });
+
+            if (attached) {
+                console.log(`      ✨ Avatar "${targetAvatar}" successfully attached to prompt bar!`);
+                break;
+            }
+            await page.waitForTimeout(600);
+        }
+
+        if (!attached) {
+            throw new Error(`[GoogleFX] ❌ Could not verify Avatar "${targetAvatar}" attachment in prompt bar. Avatar is REQUIRED.`);
+        }
+
+        await page.waitForTimeout(1000);
     }
 
     async _logChatReplies(page, context = 'Chat') {
@@ -2725,18 +2848,14 @@ export class GoogleFxFlowTool extends BaseTool {
             return false;
         });
 
-        const retryAvatarName = this._lastAvatarName || '';
+        const retryAvatarName = (this._lastAvatarName && String(this._lastAvatarName).trim()) || 'me';
         const retryMediaUrl = this._lastMediaUrl || '';
 
-        if (!avatarStillAttached && retryAvatarName) {
-            console.log(`      👤 Avatar not in prompt bar — re-adding avatar "${retryAvatarName}"...`);
-            try {
-                await this._addAvatarToPrompt(page, retryAvatarName);
-                await page.waitForTimeout(1000);
-            } catch (avatarErr) {
-                console.warn(`      ⚠️ Could not re-add avatar: ${avatarErr.message}`);
-            }
-        } else if (avatarStillAttached) {
+        if (!avatarStillAttached) {
+            console.log(`      👤 Avatar not in prompt bar — re-adding avatar "${retryAvatarName}" (REQUIRED)...`);
+            await this._addAvatarToPrompt(page, retryAvatarName);
+            await page.waitForTimeout(1000);
+        } else {
             console.log(`      ✅ Avatar still attached in prompt bar — skipping re-add`);
         }
 

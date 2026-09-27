@@ -15,7 +15,7 @@ const generateAvatarSchema = Joi.object({
         'any.required': 'prompt field is required',
     }),
     type: Joi.string().valid('video', 'avatar_video').optional().default('avatar_video'),
-    avatarName: Joi.string().optional().default('me').messages({
+    avatarName: Joi.string().optional().allow(null, '').default('me').messages({
         'string.base': 'avatarName must be a string',
     }),
     settings: Joi.object().optional().default({}),
@@ -60,7 +60,7 @@ const handleGenerateAvatarVideo = async (req, res) => {
 
     const { prompt, settings } = value;
     const type = value.type || 'avatar_video';
-    const avatarName = value.avatarName || 'me';
+    const avatarName = (value.avatarName && String(value.avatarName).trim()) || 'me';
     const mediaUrl = value.mediaUrl || value.imageUrl || null;
     const proxy = value.proxy || null; // Webshare proxy config { server, username, password }
     const itemId = `gen_${uuidv4().replace(/-/g, '').substring(0, 12)}`;

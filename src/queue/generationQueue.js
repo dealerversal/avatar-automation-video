@@ -33,14 +33,15 @@ class GenerationQueue {
         this.isProcessing = true;
         const currentJobData = this.queue.shift();
         const { itemId, type, prompt, settings, avatarName } = currentJobData;
+        const effectiveAvatarName = (avatarName && String(avatarName).trim()) || 'me';
         const mediaUrl = currentJobData.mediaUrl || currentJobData.imageUrl || null;
         const proxy = currentJobData.proxy || null; // Webshare proxy config (may be null = direct)
 
         console.log('\n' + '═'.repeat(60));
         console.log(`⚙️  [Queue Worker] Processing Scene Creation Job: ${itemId}`);
-        console.log(`🎬  Type: ${type} | Avatar: ${avatarName || 'me'} | Prompt Length: ${prompt ? prompt.length : 0} chars`);
+        console.log(`🎬  Type: ${type} | Avatar: ${effectiveAvatarName} (REQUIRED) | Prompt Length: ${prompt ? prompt.length : 0} chars`);
         if (mediaUrl) console.log(`🖼️   Media URL: ${mediaUrl}`);
-        if (avatarName) console.log(`👤  Avatar Name: ${avatarName}`);
+        console.log(`👤  Avatar Name: ${effectiveAvatarName} (REQUIRED)`);
         console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
         console.log('📦 FULL JOB PAYLOAD DATA:');
         console.log(JSON.stringify(currentJobData, null, 2));
@@ -63,7 +64,7 @@ class GenerationQueue {
 
             // Get automation tool
             const tool = registry.getTool('google_fx_flow');
-            const result = await tool.execute({ itemId, prompt, type, settings, mediaUrl, imageUrl: mediaUrl, avatarName, proxy });
+            const result = await tool.execute({ itemId, prompt, type, settings, mediaUrl, imageUrl: mediaUrl, avatarName: effectiveAvatarName, proxy });
 
             const durationMs = Date.now() - startTime;
             const isVideoType = type === 'video' || type === 'avatar_video';
