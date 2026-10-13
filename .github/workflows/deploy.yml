@@ -1,4 +1,4 @@
-name: Deploy Avatar Automation Video to Dual VPS all working
+name: Deploy Avatar Automation Video to Dual VPS 
 
 on:
   push:
