@@ -1070,47 +1070,35 @@ export class GoogleFxFlowTool extends BaseTool {
                     const coords = await page.evaluate(() => {
                         const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
 
-                        // STRATEGY 1: Top-right gear icon with aria-label="Settings" (confirmed working in new Flow UI)
-                        let btn = Array.from(document.querySelectorAll('button, [role="button"]')).find(b => {
-                            if (!isVisible(b)) return false;
-                            const aria = (b.getAttribute('aria-label') || '').toLowerCase().trim();
-                            return aria === 'settings';
-                        });
+                        // STRATEGY 1: "tune" button INSIDE the agent prompt bar (bottom of right panel).
+                        // NOTE: the top-right gear also has aria-label="Settings" but opens global settings,
+                        // NOT "Agent settings" — so we only accept buttons in the lower-right prompt bar.
+                        const inPromptBar = b => {
+                            const r = b.getBoundingClientRect();
+                            return r.left > window.innerWidth * 0.5 && r.top > window.innerHeight * 0.6;
+                        };
+                        const notHeader = b => b.getBoundingClientRect().top > window.innerHeight * 0.15;
+                        const isGear = b => b.classList.contains('mat-mdc-menu-trigger') ||
+                            (b.innerText || b.textContent || '').toLowerCase().includes('settings_2');
+                        const isTuneBtn = b => {
+                            if (!isVisible(b) || !notHeader(b) || isGear(b)) return false;
+                            const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
+                            if (txt === 'tune') return true;
+                            return Array.from(b.querySelectorAll('mat-icon, .material-icons, .google-symbols, span, i'))
+                                .some(el => (el.textContent || '').trim().toLowerCase() === 'tune');
+                        };
+                        const tuneBtns = Array.from(document.querySelectorAll('button, [role="button"]')).filter(isTuneBtn);
+                        // Prefer the one in the lower-right prompt bar; otherwise the lowest one on screen
+                        let btn = Array.from(document.querySelectorAll('.agent-input-actions button.agent-action-button')).find(b =>
+                            isVisible(b) && !isGear(b) && (b.getAttribute('aria-label') || '').toLowerCase().trim() === 'settings') ||
+                            tuneBtns.find(inPromptBar) ||
+                            tuneBtns.sort((a, b) => b.getBoundingClientRect().top - a.getBoundingClientRect().top)[0] || null;
 
-                        // STRATEGY 2: tune icon text in the bottom prompt bar (old behavior)
+                        // Fallback: "Settings" aria-label button, but ONLY outside the header (never the top-right gear)
                         if (!btn) {
-                            const isSettingsTarget = b => {
-                                if (!b) return false;
-                                const txt = (b.innerText || b.textContent || '').toLowerCase().trim();
-                                const aria = (b.getAttribute('aria-label') || '').toLowerCase();
-                                if (txt.includes('expand') || aria.includes('expand')) return false;
-                                if (txt.includes('instruction') || aria.includes('instruction')) return false;
-                                if (txt === 'arrow_forward' || aria === 'create' || aria === 'send') return false;
-                                return true;
-                            };
-                            btn = Array.from(document.querySelectorAll('button'))
-                                .filter(isSettingsTarget)
-                                .find(b => isVisible(b) && Array.from(b.querySelectorAll('*')).some(el => (el.textContent || '').trim() === 'tune'));
-                        }
-
-                        // STRATEGY 3: sliders icon aria-label
-                        if (!btn) {
-                            btn = Array.from(document.querySelectorAll('button, [role="button"]')).find(b => {
-                                if (!isVisible(b)) return false;
-                                const aria = (b.getAttribute('aria-label') || '').toLowerCase();
-                                const txt = (b.innerText || b.textContent || '').toLowerCase().trim();
-                                return aria.includes('setting') || aria.includes('sliders') || aria.includes('tune') ||
-                                    txt === 'tune' || txt === 'sliders';
-                            });
-                        }
-
-                        // STRATEGY 4: Old class-name based approach (legacy fallback)
-                        if (!btn) {
-                            btn = Array.from(document.querySelectorAll('button')).find(b => {
-                                if (!isVisible(b)) return false;
-                                const cls = b.className || '';
-                                return cls.includes('sc-c4e423a0-1');
-                            });
+                            btn = Array.from(document.querySelectorAll('button, [role="button"]')).find(b =>
+                                isVisible(b) && notHeader(b) && inPromptBar(b) &&
+                                (b.getAttribute('aria-label') || '').toLowerCase().trim() === 'settings') || null;
                         }
 
                         if (btn) {
@@ -2782,6 +2770,14 @@ export class GoogleFxFlowTool extends BaseTool {
             return null;
         });
 
+        const _sendFired = async () => page.evaluate(() => {
+            const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+            const btns = Array.from(document.querySelectorAll('button')).filter(b => isVisible(b) && b.getBoundingClientRect().left > window.innerWidth * 0.5);
+            const hasStop = btns.some(b => (b.innerText || '').trim().toLowerCase() === 'stop');
+            const hasSend = btns.some(b => (b.innerText || '').trim() === 'arrow_forward');
+            return hasStop || !hasSend;
+        });
+
         if (sendCoords && sendCoords.cx > 0 && sendCoords.cy > 0) {
             console.log(`      📤 Clicked Send/Create button at [${sendCoords.cx}, ${sendCoords.cy}]`);
             try { await page.mouse.click(sendCoords.cx, sendCoords.cy); } catch {}
@@ -2790,7 +2786,20 @@ export class GoogleFxFlowTool extends BaseTool {
             await page.keyboard.press('Enter');
         }
 
-        await page.waitForTimeout(3000);
+        await page.waitForTimeout(2000);
+        for (let r = 1; r <= 3 && !(await _sendFired()); r++) {
+            console.warn(`      ⚠️ Send not registered — retrying (${r}/3)...`);
+            const c = await page.evaluate(() => {
+                const b = Array.from(document.querySelectorAll('button')).find(b => b.offsetWidth > 0 && (b.innerText || '').trim() === 'arrow_forward' && b.getBoundingClientRect().left > window.innerWidth * 0.5);
+                if (!b) return null;
+                const rc = b.getBoundingClientRect();
+                return { cx: Math.round(rc.left + rc.width / 2), cy: Math.round(rc.top + rc.height / 2) };
+            });
+            if (c) { try { await page.mouse.click(c.cx, c.cy); } catch {} }
+            else { await page.keyboard.press('Enter'); }
+            await page.waitForTimeout(2000);
+        }
+        await page.waitForTimeout(1000);
 
         // Log chat replay after prompt submission
         await this._logChatReplies(page, 'After Prompt Submit');
