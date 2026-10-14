@@ -31,11 +31,17 @@ export function sanitizePromptForGooglePolicy(prompt, options = {}) {
 
   let sanitized = prompt;
 
-  // Precisely isolate the actual spoken voiceover scene block: [VOICEOVER]\n"..."
-  // so spoken audio narration is preserved, while all visual & descriptive prompt directives are strictly sanitized.
-  const voMatch = sanitized.match(/(?:^|\n)(\[VOICEOVER\]\s*\n\s*"[^"]*")/i);
-  const voText = voMatch ? voMatch[1] : '';
-  let nonVoText = voText ? sanitized.replace(voText, '___VOICEOVER_BLOCK_PLACEHOLDER___') : sanitized;
+  // Precisely isolate all spoken voiceover blocks so voiceover audio narration is preserved verbatim
+  // and real presenter names in voiceover audio narration are NEVER replaced with 'the Presenter'.
+  const voBlocks = [];
+  let nonVoText = sanitized.replace(
+    /(?:^|\n)(###?\s*Voiceover[^\n]*\n[\s\S]*?)(?=\n---|\n## |\n### |$)|(?:^|\n)(\[VOICEOVER\][^\n]*\n[\s\S]*?)(?=\n---|\n## |\n### |\n\[|$)/gi,
+    (match) => {
+      const idx = voBlocks.length;
+      voBlocks.push(match);
+      return `\n___VOICEOVER_BLOCK_PLACEHOLDER_${idx}___\n`;
+    }
+  );
 
   // 1. Sanitize deepfake, impersonation, and real-person terminology in visual instructions
   nonVoText = nonVoText
@@ -107,8 +113,11 @@ export function sanitizePromptForGooglePolicy(prompt, options = {}) {
     nonVoText = nonVoText.replace(nameRegex, 'the Presenter');
   }
 
-  // Restore [VOICEOVER] block
-  sanitized = voMatch ? nonVoText.replace('___VOICEOVER_BLOCK_PLACEHOLDER___', voText) : nonVoText;
+  // Restore voiceover blocks verbatim
+  sanitized = nonVoText;
+  for (let i = 0; i < voBlocks.length; i++) {
+    sanitized = sanitized.replace(`___VOICEOVER_BLOCK_PLACEHOLDER_${i}___`, voBlocks[i].trim());
+  }
 
   // 3. Prepend the Safety & Policy Compliance Header at the VERY TOP if not already present
   if (!sanitized.includes('[SAFETY & POLICY COMPLIANCE')) {
