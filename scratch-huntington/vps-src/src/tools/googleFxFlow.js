@@ -428,9 +428,26 @@ export class GoogleFxFlowTool extends BaseTool {
                 );
             }
 
-            // 2. Always click "New Project" button first
-            console.log(`\n[3/6] ➕ Creating a new project...`);
-            await this._createNewProject(page);
+            // 2. Always click "New Project" button first (with multi-attempt new project retry if generation stalls)
+            const MAX_PROJECT_ATTEMPTS = 3;
+            let result = null;
+
+            for (let projectAttempt = 1; projectAttempt <= MAX_PROJECT_ATTEMPTS; projectAttempt++) {
+                try {
+                    if (projectAttempt > 1) {
+                        console.log(`\n🔄 [GoogleFX] [PROJECT RETRY ${projectAttempt}/${MAX_PROJECT_ATTEMPTS}] Starting fresh attempt in a BRAND NEW project...`);
+                        try {
+                            if (page && !page.isClosed()) await page.close();
+                        } catch (closeErr) {}
+                        page = await context.newPage();
+                        await page.goto(GOOGLE_FX_URL, { waitUntil: 'commit', timeout: config.browser.timeoutMs });
+                        await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {});
+                        await page.waitForTimeout(2500);
+                        await this._dismissOverlays(page);
+                    }
+
+                    console.log(`\n[3/6] ➕ Creating a new project (attempt ${projectAttempt}/${MAX_PROJECT_ATTEMPTS})...`);
+                    await this._createNewProject(page, projectAttempt > 1);
             let projectUrl = page.url();
             console.log(`      ✅ New project opened: ${projectUrl}`);
 
@@ -555,7 +572,36 @@ export class GoogleFxFlowTool extends BaseTool {
 
             // 8. Poll and Extract Results & Download Local Asset
             console.log(`\n[8/8] ⏳ Polling for ${type} generation completion, downloading asset & saving locally...`);
-            const result = await this._extractResult(page, type, itemId, allExcludedUrls);
+            result = await this._extractResult(page, type, itemId, allExcludedUrls);
+            break; // SUCCESS! Break out of project attempt loop
+        } catch (projErr) {
+            if (projErr.message && projErr.message.includes('STUCK_AT_95_NEW_PROJECT_REQUIRED')) {
+                if (projectAttempt < MAX_PROJECT_ATTEMPTS) {
+                    console.warn(`\n⚠️ [GoogleFX] Generation was STUCK for 10 checks in current project. Abandoning project and starting a BRAND NEW PROJECT from scratch (attempt ${projectAttempt + 1}/${MAX_PROJECT_ATTEMPTS})...\n`);
+                    if (itemId) {
+                        try {
+                            const jobsCol = getJobsCollection();
+                            await jobsCol.updateOne(
+                                { itemId },
+                                {
+                                    $set: {
+                                        progressStatus: `Generation stalled at 95%. Abandoning project & creating fresh project attempt ${projectAttempt + 1}/${MAX_PROJECT_ATTEMPTS}...`,
+                                        updatedAt: new Date(),
+                                    }
+                                }
+                            );
+                        } catch (e) {}
+                    }
+                    continue;
+                }
+            }
+            throw projErr;
+        }
+    }
+
+    if (!result) {
+        throw new Error('[GoogleFX] ❌ Failed to generate video across all project attempts.');
+    }
 
             const totalMs = Date.now() - execStart;
             console.log('\n' + '─'.repeat(60));
@@ -634,12 +680,14 @@ export class GoogleFxFlowTool extends BaseTool {
         }
     }
 
-    async _createNewProject(page) {
-        // If not on main lander, navigate to GOOGLE_FX_URL first to locate New Project button
-        if (!page.url().includes('flow.google.com') && !page.url().includes('labs.google/fx/tools/flow')) {
+    async _createNewProject(page, forceNavigate = false) {
+        // If not on main lander, or inside a project URL, or forceNavigate, navigate to GOOGLE_FX_URL first to locate New Project button
+        if (forceNavigate || page.url().includes('/project/') || (!page.url().includes('flow.google.com') && !page.url().includes('labs.google/fx/tools/flow'))) {
+            console.log(`      🌍 Navigating to main flow landing page to ensure fresh "New Project" button...`);
             await page.goto(GOOGLE_FX_URL, { waitUntil: 'commit', timeout: config.browser.timeoutMs });
             await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {});
-            await page.waitForTimeout(2000);
+            await page.waitForTimeout(2500);
+            await this._dismissOverlays(page);
         }
 
         const newProjectSelectors = [
@@ -3229,10 +3277,10 @@ export class GoogleFxFlowTool extends BaseTool {
                     // or if total generation time has exceeded 4 minutes (240s)
                     if (!liveState.hasActiveSpinner && !liveState.isGeneratingText && (effectivePct >= 95 || (effectivePct === lastProgressPct && effectivePct >= 90))) {
                         stuckProgressCount++;
-                        console.log(`      ⏳ Generation holding at ${effectivePct}% [stuck check ${stuckProgressCount}/30] (${elapsedSec}s)`);
+                        console.log(`      ⏳ Generation holding at ${effectivePct}% [stuck check ${stuckProgressCount}/10] (${elapsedSec}s)`);
                     } else if (elapsedSec > 240) {
                         stuckProgressCount++;
-                        console.log(`      ⏳ Generation exceeded 240s [stuck check ${stuckProgressCount}/30] (${elapsedSec}s)`);
+                        console.log(`      ⏳ Generation exceeded 240s [stuck check ${stuckProgressCount}/10] (${elapsedSec}s)`);
                     } else {
                         stuckProgressCount = 0;
                     }
@@ -3246,37 +3294,11 @@ export class GoogleFxFlowTool extends BaseTool {
                 }
             }
 
-            // ── STUCK AT 95% PROGRESS CHECK: if stuck count >= 30, mark as failed & retry prompt ──
-            if (stuckProgressCount >= 30) {
-                console.warn(`      ⚠️ Generation progress stuck at ${effectivePct || 95}% ${liveState.statusText ? `(${liveState.statusText})` : ''} for 30 checks (~150s) — generation stalled/failed. Triggering instant retry...`);
-                retryCount = (retryCount || 0) + 1;
-                if (retryCount > 3) {
-                    throw new Error(`[GoogleFX] ❌ Generation stuck at ${effectivePct || 95}% repeated 3 times — aborting.`);
-                }
-                console.log(`      🔄 Stuck generation retry ${retryCount}/3 — resetting and re-submitting prompt...`);
-                stuckProgressCount = 0;
-                lastProgressPct = -1;
-
-                if (itemId) {
-                    try {
-                        const jobsCol = getJobsCollection();
-                        await jobsCol.updateOne(
-                            { itemId },
-                            {
-                                $set: {
-                                    progressStatus: `Generation stalled at ${effectivePct || 95}%. Retrying attempt ${retryCount}/3...`,
-                                    updatedAt: new Date(),
-                                }
-                            }
-                        );
-                    } catch (e) {}
-                }
-
-                const resubmitted = await this._resubmitPromptForRetry(page);
-                if (resubmitted) {
-                    lastActivityTime = Date.now();
-                    continue;
-                }
+            // ── STUCK AT 95% PROGRESS CHECK: if stuck count >= 10, abandon hung project & create a NEW project from scratch ──
+            if (stuckProgressCount >= 10) {
+                console.warn(`      ⚠️ Generation progress stuck at ${effectivePct || 95}% ${liveState.statusText ? `(${liveState.statusText})` : ''} for 10 checks (~50s) — project canvas is stalled.`);
+                console.warn(`      🚀 ABANDONING current project to create a BRAND NEW project and redo everything from scratch...`);
+                throw new Error(`[GoogleFX] STUCK_AT_95_NEW_PROJECT_REQUIRED: Generation progress stuck at ${effectivePct || 95}% for 10 checks (~50s). Abandoning hung project.`);
             }
 
             // CRITICAL GATE: COMPLETED when a new generated asset appears

@@ -428,134 +428,180 @@ export class GoogleFxFlowTool extends BaseTool {
                 );
             }
 
-            // 2. Always click "New Project" button first
-            console.log(`\n[3/6] ➕ Creating a new project...`);
-            await this._createNewProject(page);
-            let projectUrl = page.url();
-            console.log(`      ✅ New project opened: ${projectUrl}`);
+            // 2. Always click "New Project" button first (with multi-attempt new project retry if generation stalls)
+            const MAX_PROJECT_ATTEMPTS = 3;
+            let result = null;
 
-            // Auto-handle OAuth consent screen if redirected to accounts.google.com
-            if (projectUrl.includes('accounts.google.com') || projectUrl.includes('signin') || projectUrl.includes('oauth')) {
-                console.log(`      ⚠️ Redirected to OAuth authorization screen, attempting auto-continue...`);
+            for (let projectAttempt = 1; projectAttempt <= MAX_PROJECT_ATTEMPTS; projectAttempt++) {
                 try {
-                    const consentBtn = await page.$('button:has-text("Continue"), button:has-text("Confirm"), button:has-text("Allow"), [data-email]');
-                    if (consentBtn && (await consentBtn.isVisible())) {
-                        await consentBtn.click();
-                        console.log(`      👉 Auto-clicked OAuth consent/account button.`);
-                        await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => {});
-                        await page.waitForTimeout(3000);
-                        projectUrl = page.url();
-                        console.log(`      ✅ Redirected after consent: ${projectUrl}`);
-                    }
-                } catch (e) {}
-            }
-
-            // Session check after project creation
-            if (projectUrl.includes('accounts.google.com') || projectUrl.includes('signin')) {
-                throw new Error('Google session expired after project creation. Please re-login in the browser profile.');
-            }
-
-            // 2b. Ensure "All Media" tab is active
-            console.log(`\n[3a/7] 📁 Selecting "All Media" tab...`);
-            await this._ensureAllMediaTab(page);
-
-            // 3. Enable Agent Mode FIRST (hardcoded enabled)
-            console.log(`\n[3b/7] 🤖 Enabling Agent mode...`);
-            await this._enableAgentMode(page);
-
-            // 4. Add account Avatar to prompt + 5. Upload media — with internal retry (max 2 retries)
-            let uploadedMediaUrls = [];
-            let mediaUploadedInThisProject = false;
-            this._mediaUploadedInCurrentProject = false;
-            const MAX_UPLOAD_RETRIES = 2;
-
-            for (let uploadAttempt = 1; uploadAttempt <= MAX_UPLOAD_RETRIES + 1; uploadAttempt++) {
-                try {
-                    if (uploadAttempt > 1) {
-                        console.log(`\n[RETRY ${uploadAttempt - 1}/${MAX_UPLOAD_RETRIES}] 🔄 Re-running avatar + upload steps after failure...`);
-                        // Close any open panels/dialogs before retry
-                        try { await page.keyboard.press('Escape'); } catch {}
-                        await page.waitForTimeout(2000);
-                        // Re-ensure drawer is open
-                        await this._clickExpandButton(page);
-                        await page.waitForTimeout(800);
+                    if (projectAttempt > 1) {
+                        console.log(`\n🔄 [GoogleFX] [PROJECT RETRY ${projectAttempt}/${MAX_PROJECT_ATTEMPTS}] Starting fresh attempt in a BRAND NEW project...`);
+                        try {
+                            if (page && !page.isClosed()) await page.close();
+                        } catch (closeErr) {}
+                        page = await context.newPage();
+                        await page.goto(GOOGLE_FX_URL, { waitUntil: 'commit', timeout: config.browser.timeoutMs });
+                        await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {});
+                        await page.waitForTimeout(2500);
+                        await this._dismissOverlays(page);
                     }
 
-                    // 4. Add account Avatar to prompt (MANDATORY & REQUIRED)
-                    this._lastAvatarName = effectiveAvatarName;
-                    console.log(`\n[4/7] 🔲 Ensuring session drawer is open before avatar selection... (attempt ${uploadAttempt})`);
-                    await this._clickExpandButton(page);
-                    await page.waitForTimeout(500);
-                    console.log(`      👤 [STEP 1/2] Selecting Avatar "${effectiveAvatarName}" and adding to prompt (REQUIRED)...`);
-                    await this._addAvatarToPrompt(page, effectiveAvatarName);
+                    console.log(`\n[3/6] ➕ Creating a new project (attempt ${projectAttempt}/${MAX_PROJECT_ATTEMPTS})...`);
+                    await this._createNewProject(page, projectAttempt > 1);
+                    let projectUrl = page.url();
+                    console.log(`      ✅ New project opened: ${projectUrl}`);
 
-                    // 5. Upload reference image/media to prompt (RULE: Upload strictly ONCE per project)
-                    if (effectiveMediaUrl) {
-                        this._lastMediaUrl = effectiveMediaUrl;
-                        if (mediaUploadedInThisProject) {
-                            console.log(`\n[5/7] ℹ️ [RULE] Reference image was already uploaded in this project (${uploadedMediaUrls.length} url(s)). Skipping re-upload on retry in same project.`);
-                        } else {
-                            console.log(`\n[5/7] 🖼️ [STEP 2/2] Uploading reference media from URL... (attempt ${uploadAttempt}/${MAX_UPLOAD_RETRIES + 1})`);
-                            uploadedMediaUrls = await this._uploadMediaFromUrl(page, effectiveMediaUrl, itemId);
-                            mediaUploadedInThisProject = true;
-                            this._mediaUploadedInCurrentProject = true;
-                            console.log(`      🔒 Uploaded media URLs captured for exclusion: ${uploadedMediaUrls.length}`);
+                    // Auto-handle OAuth consent screen if redirected to accounts.google.com
+                    if (projectUrl.includes('accounts.google.com') || projectUrl.includes('signin') || projectUrl.includes('oauth')) {
+                        console.log(`      ⚠️ Redirected to OAuth authorization screen, attempting auto-continue...`);
+                        try {
+                            const consentBtn = await page.$('button:has-text("Continue"), button:has-text("Confirm"), button:has-text("Allow"), [data-email]');
+                            if (consentBtn && (await consentBtn.isVisible())) {
+                                await consentBtn.click();
+                                console.log(`      👉 Auto-clicked OAuth consent/account button.`);
+                                await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => {});
+                                await page.waitForTimeout(3000);
+                                projectUrl = page.url();
+                                console.log(`      ✅ Redirected after consent: ${projectUrl}`);
+                            }
+                        } catch (e) {}
+                    }
+
+                    // Session check after project creation
+                    if (projectUrl.includes('accounts.google.com') || projectUrl.includes('signin')) {
+                        throw new Error('Google session expired after project creation. Please re-login in the browser profile.');
+                    }
+
+                    // 2b. Ensure "All Media" tab is active
+                    console.log(`\n[3a/7] 📁 Selecting "All Media" tab...`);
+                    await this._ensureAllMediaTab(page);
+
+                    // 3. Enable Agent Mode FIRST (hardcoded enabled)
+                    console.log(`\n[3b/7] 🤖 Enabling Agent mode...`);
+                    await this._enableAgentMode(page);
+
+                    // 4. Add account Avatar to prompt + 5. Upload media — with internal retry (max 2 retries)
+                    let uploadedMediaUrls = [];
+                    let mediaUploadedInThisProject = false;
+                    this._mediaUploadedInCurrentProject = false;
+                    const MAX_UPLOAD_RETRIES = 2;
+
+                    for (let uploadAttempt = 1; uploadAttempt <= MAX_UPLOAD_RETRIES + 1; uploadAttempt++) {
+                        try {
+                            if (uploadAttempt > 1) {
+                                console.log(`\n[RETRY ${uploadAttempt - 1}/${MAX_UPLOAD_RETRIES}] 🔄 Re-running avatar + upload steps after failure...`);
+                                // Close any open panels/dialogs before retry
+                                try { await page.keyboard.press('Escape'); } catch {}
+                                await page.waitForTimeout(2000);
+                                // Re-ensure drawer is open
+                                await this._clickExpandButton(page);
+                                await page.waitForTimeout(800);
+                            }
+
+                            // 4. Add account Avatar to prompt (MANDATORY & REQUIRED)
+                            this._lastAvatarName = effectiveAvatarName;
+                            console.log(`\n[4/7] 🔲 Ensuring session drawer is open before avatar selection... (attempt ${uploadAttempt})`);
+                            await this._clickExpandButton(page);
+                            await page.waitForTimeout(500);
+                            console.log(`      👤 [STEP 1/2] Selecting Avatar "${effectiveAvatarName}" and adding to prompt (REQUIRED)...`);
+                            await this._addAvatarToPrompt(page, effectiveAvatarName);
+
+                            // 5. Upload reference image/media to prompt (RULE: Upload strictly ONCE per project)
+                            if (effectiveMediaUrl) {
+                                this._lastMediaUrl = effectiveMediaUrl;
+                                if (mediaUploadedInThisProject) {
+                                    console.log(`\n[5/7] ℹ️ [RULE] Reference image was already uploaded in this project (${uploadedMediaUrls.length} url(s)). Skipping re-upload on retry in same project.`);
+                                } else {
+                                    console.log(`\n[5/7] 🖼️ [STEP 2/2] Uploading reference media from URL... (attempt ${uploadAttempt}/${MAX_UPLOAD_RETRIES + 1})`);
+                                    uploadedMediaUrls = await this._uploadMediaFromUrl(page, effectiveMediaUrl, itemId);
+                                    mediaUploadedInThisProject = true;
+                                    this._mediaUploadedInCurrentProject = true;
+                                    console.log(`      🔒 Uploaded media URLs captured for exclusion: ${uploadedMediaUrls.length}`);
+                                }
+                            }
+
+                            // Success — break out of retry loop
+                            break;
+
+                        } catch (uploadErr) {
+                            const isLastAttempt = uploadAttempt > MAX_UPLOAD_RETRIES;
+                            if (isLastAttempt) {
+                                console.error(`      ❌ Upload/avatar failed after ${MAX_UPLOAD_RETRIES} retries: ${uploadErr.message}`);
+                                throw uploadErr; // Let queue-level retry handle it
+                            }
+                            console.warn(`      ⚠️ Upload/avatar attempt ${uploadAttempt} failed: ${uploadErr.message}`);
+                            console.log(`      ⏳ Waiting 3s before retry ${uploadAttempt + 1}/${MAX_UPLOAD_RETRIES + 1}...`);
+                            await page.waitForTimeout(3000);
                         }
                     }
 
-                    // Success — break out of retry loop
-                    break;
+                    // 6. Open Agent Settings → configure (aspect ratio, model, duration, Never) → Save
+                    console.log(`\n[6/7] ⚙️ Opening Agent Settings and applying configuration...`);
+                    await this._applyAgentSettings(page, actualGenType, settings, cleanPrompt);
 
-                } catch (uploadErr) {
-                    const isLastAttempt = uploadAttempt > MAX_UPLOAD_RETRIES;
-                    if (isLastAttempt) {
-                        console.error(`      ❌ Upload/avatar failed after ${MAX_UPLOAD_RETRIES} retries: ${uploadErr.message}`);
-                        throw uploadErr; // Let queue-level retry handle it
-                    }
-                    console.warn(`      ⚠️ Upload/avatar attempt ${uploadAttempt} failed: ${uploadErr.message}`);
-                    console.log(`      ⏳ Waiting 3s before retry ${uploadAttempt + 1}/${MAX_UPLOAD_RETRIES + 1}...`);
+                    // Wait for prompt bar to fully settle after upload + settings,
+                    // then snapshot ALL pre-existing media URLs (to exclude from result polling).
                     await page.waitForTimeout(3000);
+                    const preExistingUrls = await page.evaluate(() => {
+                        const urls = new Set();
+                        document.querySelectorAll('img[src], video[src], video source[src]').forEach(el => {
+                            const src = el.getAttribute('src') || '';
+                            if (src && !src.startsWith('data:')) urls.add(src);
+                        });
+                        document.querySelectorAll('[src]').forEach(el => {
+                            const src = el.getAttribute('src') || '';
+                            if (src && (src.startsWith('blob:') || src.startsWith('http'))) urls.add(src);
+                        });
+                        return Array.from(urls);
+                    });
+                    console.log(`      📸 Pre-submit snapshot: ${preExistingUrls.length} existing media URLs captured (will be excluded from result)`);
+
+                    // 7. Enter Prompt & Submit
+                    // Ensure session drawer is open — it can close after media panel or settings panel interactions
+                    console.log(`\n[7/7] 🔲 Ensuring session drawer is open before prompt submission...`);
+                    await this._clickExpandButton(page);
+                    await page.waitForTimeout(800);
+                    console.log(`      ⌨️ Submitting prompt into generation bar...`);
+                    this._lastPrompt = cleanPrompt; // store for cancellation retry in _extractResult
+                    const postSubmitUrls = await this._submitPrompt(page, cleanPrompt);
+                    console.log(`      ✅ Prompt submitted!`);
+
+                    // Merge: preExisting + post-submit snapshot + explicitly captured uploaded URLs
+                    const allExcludedUrls = Array.from(new Set([...preExistingUrls, ...(postSubmitUrls || []), ...uploadedMediaUrls]));
+                    console.log(`      🔒 Total excluded reference media URLs: ${allExcludedUrls.length} (preExisting=${preExistingUrls.length}, postSubmit=${(postSubmitUrls||[]).length}, uploadedCapture=${uploadedMediaUrls.length})`);
+
+                    // 8. Poll and Extract Results & Download Local Asset
+                    console.log(`\n[8/8] ⏳ Polling for ${type} generation completion, downloading asset & saving locally...`);
+                    result = await this._extractResult(page, type, itemId, allExcludedUrls);
+                    break; // SUCCESS! Break out of project attempt loop
+                } catch (projErr) {
+                    if (projErr.message && projErr.message.includes('STUCK_AT_95_NEW_PROJECT_REQUIRED')) {
+                        if (projectAttempt < MAX_PROJECT_ATTEMPTS) {
+                            console.warn(`\n⚠️ [GoogleFX] Generation was STUCK for 10 checks in current project. Abandoning project and starting a BRAND NEW PROJECT from scratch (attempt ${projectAttempt + 1}/${MAX_PROJECT_ATTEMPTS})...\n`);
+                            if (itemId) {
+                                try {
+                                    const jobsCol = getJobsCollection();
+                                    await jobsCol.updateOne(
+                                        { itemId },
+                                        {
+                                            $set: {
+                                                progressStatus: `Generation stalled at 95%. Abandoning project & creating fresh project attempt ${projectAttempt + 1}/${MAX_PROJECT_ATTEMPTS}...`,
+                                                updatedAt: new Date(),
+                                            }
+                                        }
+                                    );
+                                } catch (e) {}
+                            }
+                            continue;
+                        }
+                    }
+                    throw projErr;
                 }
             }
 
-            // 6. Open Agent Settings → configure (aspect ratio, model, duration, Never) → Save
-            console.log(`\n[6/7] ⚙️ Opening Agent Settings and applying configuration...`);
-            await this._applyAgentSettings(page, actualGenType, settings, cleanPrompt);
-
-            // Wait for prompt bar to fully settle after upload + settings,
-            // then snapshot ALL pre-existing media URLs (to exclude from result polling).
-            await page.waitForTimeout(3000);
-            const preExistingUrls = await page.evaluate(() => {
-                const urls = new Set();
-                document.querySelectorAll('img[src], video[src], video source[src]').forEach(el => {
-                    const src = el.getAttribute('src') || '';
-                    if (src && !src.startsWith('data:')) urls.add(src);
-                });
-                document.querySelectorAll('[src]').forEach(el => {
-                    const src = el.getAttribute('src') || '';
-                    if (src && (src.startsWith('blob:') || src.startsWith('http'))) urls.add(src);
-                });
-                return Array.from(urls);
-            });
-            console.log(`      📸 Pre-submit snapshot: ${preExistingUrls.length} existing media URLs captured (will be excluded from result)`);
-
-            // 7. Enter Prompt & Submit
-            // Ensure session drawer is open — it can close after media panel or settings panel interactions
-            console.log(`\n[7/7] 🔲 Ensuring session drawer is open before prompt submission...`);
-            await this._clickExpandButton(page);
-            await page.waitForTimeout(800);
-            console.log(`      ⌨️ Submitting prompt into generation bar...`);
-            this._lastPrompt = cleanPrompt; // store for cancellation retry in _extractResult
-            const postSubmitUrls = await this._submitPrompt(page, cleanPrompt);
-            console.log(`      ✅ Prompt submitted!`);
-
-            // Merge: preExisting + post-submit snapshot + explicitly captured uploaded URLs
-            const allExcludedUrls = Array.from(new Set([...preExistingUrls, ...(postSubmitUrls || []), ...uploadedMediaUrls]));
-            console.log(`      🔒 Total excluded reference media URLs: ${allExcludedUrls.length} (preExisting=${preExistingUrls.length}, postSubmit=${(postSubmitUrls||[]).length}, uploadedCapture=${uploadedMediaUrls.length})`);
-
-            // 8. Poll and Extract Results & Download Local Asset
-            console.log(`\n[8/8] ⏳ Polling for ${type} generation completion, downloading asset & saving locally...`);
-            const result = await this._extractResult(page, type, itemId, allExcludedUrls);
+            if (!result) {
+                throw new Error('[GoogleFX] ❌ Failed to generate video across all project attempts.');
+            }
 
             const totalMs = Date.now() - execStart;
             console.log('\n' + '─'.repeat(60));
@@ -634,12 +680,14 @@ export class GoogleFxFlowTool extends BaseTool {
         }
     }
 
-    async _createNewProject(page) {
-        // If not on main lander, navigate to GOOGLE_FX_URL first to locate New Project button
-        if (!page.url().includes('flow.google.com') && !page.url().includes('labs.google/fx/tools/flow')) {
+    async _createNewProject(page, forceNavigate = false) {
+        // If not on main lander, or inside a project URL, or forceNavigate, navigate to GOOGLE_FX_URL first to locate New Project button
+        if (forceNavigate || page.url().includes('/project/') || (!page.url().includes('flow.google.com') && !page.url().includes('labs.google/fx/tools/flow'))) {
+            console.log(`      🌍 Navigating to main flow landing page to ensure fresh "New Project" button...`);
             await page.goto(GOOGLE_FX_URL, { waitUntil: 'commit', timeout: config.browser.timeoutMs });
             await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {});
-            await page.waitForTimeout(2000);
+            await page.waitForTimeout(2500);
+            await this._dismissOverlays(page);
         }
 
         const newProjectSelectors = [
@@ -3229,10 +3277,10 @@ export class GoogleFxFlowTool extends BaseTool {
                     // or if total generation time has exceeded 4 minutes (240s)
                     if (!liveState.hasActiveSpinner && !liveState.isGeneratingText && (effectivePct >= 95 || (effectivePct === lastProgressPct && effectivePct >= 90))) {
                         stuckProgressCount++;
-                        console.log(`      ⏳ Generation holding at ${effectivePct}% [stuck check ${stuckProgressCount}/30] (${elapsedSec}s)`);
+                        console.log(`      ⏳ Generation holding at ${effectivePct}% [stuck check ${stuckProgressCount}/10] (${elapsedSec}s)`);
                     } else if (elapsedSec > 240) {
                         stuckProgressCount++;
-                        console.log(`      ⏳ Generation exceeded 240s [stuck check ${stuckProgressCount}/30] (${elapsedSec}s)`);
+                        console.log(`      ⏳ Generation exceeded 240s [stuck check ${stuckProgressCount}/10] (${elapsedSec}s)`);
                     } else {
                         stuckProgressCount = 0;
                     }
@@ -3246,37 +3294,11 @@ export class GoogleFxFlowTool extends BaseTool {
                 }
             }
 
-            // ── STUCK AT 95% PROGRESS CHECK: if stuck count >= 30, mark as failed & retry prompt ──
-            if (stuckProgressCount >= 30) {
-                console.warn(`      ⚠️ Generation progress stuck at ${effectivePct || 95}% ${liveState.statusText ? `(${liveState.statusText})` : ''} for 30 checks (~150s) — generation stalled/failed. Triggering instant retry...`);
-                retryCount = (retryCount || 0) + 1;
-                if (retryCount > 3) {
-                    throw new Error(`[GoogleFX] ❌ Generation stuck at ${effectivePct || 95}% repeated 3 times — aborting.`);
-                }
-                console.log(`      🔄 Stuck generation retry ${retryCount}/3 — resetting and re-submitting prompt...`);
-                stuckProgressCount = 0;
-                lastProgressPct = -1;
-
-                if (itemId) {
-                    try {
-                        const jobsCol = getJobsCollection();
-                        await jobsCol.updateOne(
-                            { itemId },
-                            {
-                                $set: {
-                                    progressStatus: `Generation stalled at ${effectivePct || 95}%. Retrying attempt ${retryCount}/3...`,
-                                    updatedAt: new Date(),
-                                }
-                            }
-                        );
-                    } catch (e) {}
-                }
-
-                const resubmitted = await this._resubmitPromptForRetry(page);
-                if (resubmitted) {
-                    lastActivityTime = Date.now();
-                    continue;
-                }
+            // ── STUCK AT 95% PROGRESS CHECK: if stuck count >= 10, abandon hung project & create a NEW project from scratch ──
+            if (stuckProgressCount >= 10) {
+                console.warn(`      ⚠️ Generation progress stuck at ${effectivePct || 95}% ${liveState.statusText ? `(${liveState.statusText})` : ''} for 10 checks (~50s) — project canvas is stalled.`);
+                console.warn(`      🚀 ABANDONING current project to create a BRAND NEW project and redo everything from scratch...`);
+                throw new Error(`[GoogleFX] STUCK_AT_95_NEW_PROJECT_REQUIRED: Generation progress stuck at ${effectivePct || 95}% for 10 checks (~50s). Abandoning hung project.`);
             }
 
             // CRITICAL GATE: COMPLETED when a new generated asset appears
