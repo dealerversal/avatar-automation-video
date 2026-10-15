@@ -506,6 +506,37 @@ export class GoogleFxFlowTool extends BaseTool {
                             console.log(`      👤 [STEP 1/2] Selecting Avatar "${effectiveAvatarName}" and adding to prompt (REQUIRED)...`);
                             await this._addAvatarToPrompt(page, effectiveAvatarName);
 
+                            // ── MANDATORY POST-CALL VERIFICATION ──────────────────────────────────
+                            // After _addAvatarToPrompt returns (even via early-return fast-path),
+                            // perform a final hard check that the avatar thumbnail is truly present
+                            // in the prompt bar. If not, throw immediately so queue retries cleanly.
+                            console.log(`      🔎 [POST-AVATAR CHECK] Performing mandatory final avatar verification in prompt bar...`);
+                            const avatarConfirmed = await page.evaluate(() => {
+                                const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+                                const promptArea = Array.from(document.querySelectorAll('[role="textbox"], [contenteditable="true"], textarea'))
+                                    .find(el => isVisible(el) && el.getBoundingClientRect().left > window.innerWidth * 0.4);
+                                if (!promptArea) return false;
+                                let container = promptArea.parentElement;
+                                for (let i = 0; i < 10 && container; i++) {
+                                    const imgs = container.querySelectorAll('img');
+                                    const hasRealImg = Array.from(imgs).some(img => isVisible(img) && img.width > 16 && img.height > 16);
+                                    if (hasRealImg) return true;
+                                    container = container.parentElement;
+                                }
+                                // Fallback: any img in right+bottom quadrant of page (prompt thumbnail area)
+                                const rightBottomImgs = Array.from(document.querySelectorAll('img')).filter(img => {
+                                    if (!isVisible(img)) return false;
+                                    const r = img.getBoundingClientRect();
+                                    return r.left > window.innerWidth * 0.5 && r.top > window.innerHeight * 0.4 && img.width > 16;
+                                });
+                                return rightBottomImgs.length > 0;
+                            });
+                            if (!avatarConfirmed) {
+                                throw new Error(`[GoogleFX] ❌ MANDATORY AVATAR CHECK FAILED: Avatar "${effectiveAvatarName}" is NOT attached to the prompt bar after _addAvatarToPrompt returned. Project will FAIL INSTANTLY and go to retry.`);
+                            }
+                            console.log(`      ✅ [POST-AVATAR CHECK] Avatar "${effectiveAvatarName}" confirmed in prompt bar — proceeding.`);
+                            // ─────────────────────────────────────────────────────────────────────
+
                             // 5. Upload reference image/media to prompt (RULE: Upload strictly ONCE per project)
                             if (effectiveMediaUrl) {
                                 this._lastMediaUrl = effectiveMediaUrl;
@@ -2483,6 +2514,7 @@ export class GoogleFxFlowTool extends BaseTool {
         console.log(`\n[Avatar] 👤 Adding Avatar "${targetAvatar}" to prompt (REQUIRED)...`);
 
         // Check if avatar is ALREADY attached in prompt bar
+        // STRICT check: require an actual <img> element inside the prompt container (not just any chip)
         const isAlreadyAttached = await page.evaluate(() => {
             const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
             const promptArea = Array.from(document.querySelectorAll('[role="textbox"], [contenteditable="true"], textarea'))
@@ -2490,15 +2522,17 @@ export class GoogleFxFlowTool extends BaseTool {
             if (!promptArea) return false;
             let container = promptArea.parentElement;
             for (let i = 0; i < 8 && container; i++) {
-                const chips = container.querySelectorAll('img, [role="button"], [class*="chip"], [class*="attachment"]');
-                if (chips.length > 0) return true;
+                // Only count real <img> elements (avatar thumbnail) — not just any chip/button
+                const imgs = container.querySelectorAll('img');
+                const hasRealImg = Array.from(imgs).some(img => isVisible(img) && img.width > 16 && img.height > 16);
+                if (hasRealImg) return true;
                 container = container.parentElement;
             }
             return false;
         });
 
         if (isAlreadyAttached) {
-            console.log(`      ✅ Avatar is already attached to prompt bar!`);
+            console.log(`      ✅ Avatar is already attached to prompt bar (verified img chip present)!`);
             return;
         }
 
