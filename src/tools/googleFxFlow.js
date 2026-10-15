@@ -2936,6 +2936,7 @@ export class GoogleFxFlowTool extends BaseTool {
 
 
     async _extractResult(page, type, itemId, preExistingUrls = []) {
+        const isVideoType = type === 'video' || type === 'avatar_video';
         const excludedUrlSet = new Set(preExistingUrls);
         const startTime = Date.now();
         let lastActivityTime = Date.now();
@@ -3053,15 +3054,24 @@ export class GoogleFxFlowTool extends BaseTool {
                     }
                 });
 
+                const isVideo = targetType === 'video' || targetType === 'avatar_video';
+
                 // Scan image elements (only large ones — not icons/UI)
+                // For video jobs: NEVER treat flow-image-tile or standalone images as target assets!
                 document.querySelectorAll('img').forEach((img) => {
                     const src = img.getAttribute('src') || '';
                     if (src && !isProfileOrUi(src)) {
+                        const isInsideImageTile = !!img.closest('flow-image-tile, [class*="image-tile"]');
+                        if (isVideo && isInsideImageTile) {
+                            return; // Strictly ignore image tiles during video generation
+                        }
                         const w = img.clientWidth || img.naturalWidth || 0;
                         const h = img.clientHeight || img.naturalHeight || 0;
                         if ((w === 0 || w >= 150) && (h === 0 || h >= 150)) {
-                            newMediaUrls.push(src);
-                            if (!newImageUrl) newImageUrl = src;
+                            if (!isVideo) {
+                                newMediaUrls.push(src);
+                                if (!newImageUrl) newImageUrl = src;
+                            }
                         }
                     }
                 });
@@ -3107,6 +3117,11 @@ export class GoogleFxFlowTool extends BaseTool {
                     return src && !src.startsWith('data:') && !excludedSet.has(src);
                 });
 
+                // Check if any video tile is currently actively generating (has spinner/progress inside it)
+                const videoTileHasSpinner = newVideoTiles.some(t => {
+                    return !!t.querySelector('[role="progressbar"], progress, [class*="spinner"], [class*="loading"], [class*="loader"], mat-progress-bar, mat-spinner');
+                });
+
                 // Collect thumbnail URLs from video tiles as the preview thumbnail
                 const videoTileUrl = newVideoTiles.length > 0
                     ? (newVideoTiles[0].querySelector('img[src]')?.getAttribute('src') || null)
@@ -3114,7 +3129,7 @@ export class GoogleFxFlowTool extends BaseTool {
                         ? (chatVideoContainers[0].querySelector('img[src]')?.getAttribute('src') || null)
                         : null);
 
-                // Note: Keep newVideoUrl strictly for real <video> sources so video jobs never return thumbnails
+                // For video jobs: newMediaUrls should ONLY contain video thumbnail or real video url
                 if (videoTileUrl && !newMediaUrls.includes(videoTileUrl)) newMediaUrls.push(videoTileUrl);
 
                 return {
@@ -3122,9 +3137,10 @@ export class GoogleFxFlowTool extends BaseTool {
                     statusText,
                     hasActiveSpinner,
                     isGeneratingText,
+                    videoTileHasSpinner,
                     mediaUrls: Array.from(new Set(newMediaUrls)),
                     videoUrl: newVideoUrl,      // blob: or http: URL from <video> if mounted
-                    imageUrl: newImageUrl || videoTileUrl,      // standalone <img> URL or tile thumbnail
+                    imageUrl: isVideo ? null : (newImageUrl || videoTileUrl),      // Image job: standalone <img> URL; Video job: null
                     thumbnailUrl: videoTileUrl,
                     videoTileCount: newVideoTiles.length + chatVideoContainers.length,  // flow-video-tile count
                     text: bodyText.substring(0, 3000),
@@ -3274,13 +3290,13 @@ export class GoogleFxFlowTool extends BaseTool {
 
                     // ── Increment stuck counter on every poll tick if progress >= 90% and not completed ──
                     // Only count as stuck if spinner/generating text is no longer active (DOM idle/hung),
-                    // or if total generation time has exceeded 4 minutes (240s)
+                    // or if total generation time has exceeded 2 minutes (120s)
                     if (!liveState.hasActiveSpinner && !liveState.isGeneratingText && (effectivePct >= 95 || (effectivePct === lastProgressPct && effectivePct >= 90))) {
                         stuckProgressCount++;
                         console.log(`      ⏳ Generation holding at ${effectivePct}% [stuck check ${stuckProgressCount}/10] (${elapsedSec}s)`);
-                    } else if (elapsedSec > 240) {
+                    } else if (elapsedSec > 120) {
                         stuckProgressCount++;
-                        console.log(`      ⏳ Generation exceeded 240s [stuck check ${stuckProgressCount}/10] (${elapsedSec}s)`);
+                        console.log(`      ⏳ Generation exceeded 120s [stuck check ${stuckProgressCount}/10] (${elapsedSec}s)`);
                     } else {
                         stuckProgressCount = 0;
                     }
@@ -3289,7 +3305,7 @@ export class GoogleFxFlowTool extends BaseTool {
                     lastActivityTime = Date.now();
                 }
             } else {
-                if (elapsedSec > 180) {
+                if (elapsedSec > 120) {
                     stuckProgressCount++;
                 }
             }
@@ -3302,33 +3318,38 @@ export class GoogleFxFlowTool extends BaseTool {
             }
 
             // CRITICAL GATE: COMPLETED when a new generated asset appears
-            const isVideoType = type === 'video' || type === 'avatar_video';
-            // For VIDEO type: Google Flow shows ONLY <flow-video-tile> (with img thumbnail) — no <video> element.
-            // So targetAsset = videoUrl (which now includes tile thumbnail) OR imageUrl as fallback.
-            const targetAsset = liveState.videoUrl || liveState.imageUrl || null;
+            // For VIDEO type: Must ONLY be considered completed when a VIDEO asset is ready!
+            // Never treat an image (or flow-image-tile) as video completion!
+            const targetAsset = isVideoType
+                ? (liveState.videoUrl || (liveState.videoTileCount > 0 ? (liveState.thumbnailUrl || 'flow-video-tile') : null))
+                : (liveState.imageUrl || liveState.thumbnailUrl || null);
 
-            // Always update activity time when any new media is found (even if spinner is still visible)
-            if (liveState.mediaUrls.length > 0 || liveState.videoTileCount > 0) {
+            const hasCompletedAsset = isVideoType
+                ? (liveState.videoTileCount > 0 || !!liveState.videoUrl)
+                : (liveState.mediaUrls.length > 0 || !!liveState.imageUrl);
+
+            // Always update activity time when target media is found
+            if (hasCompletedAsset) {
                 lastActivityTime = Date.now();
                 consecutiveMediaFound++;
             } else {
                 consecutiveMediaFound = 0;
             }
 
-            const spinnerGone = !liveState.hasActiveSpinner;
+            const spinnerGone = !liveState.hasActiveSpinner && (!isVideoType || !liveState.videoTileHasSpinner);
             const hadHighProgress = lastProgressPct >= 90;
             const videoFoundAfterProgress = targetAsset && hadHighProgress;
             // Safety net: if video found 3+ consecutive polls but spinner still detected (false positive)
-            const persistentMediaFound = (targetAsset || liveState.videoTileCount > 0) && consecutiveMediaFound >= 3;
+            const persistentMediaFound = targetAsset && consecutiveMediaFound >= 3;
 
-            if ((targetAsset || liveState.videoTileCount > 0) && (liveState.mediaUrls.length > 0 || liveState.videoTileCount > 0) && (spinnerGone || videoFoundAfterProgress || persistentMediaFound)) {
+            if (targetAsset && hasCompletedAsset && (spinnerGone || videoFoundAfterProgress || persistentMediaFound)) {
                 const reason = spinnerGone ? 'spinner gone' : hadHighProgress ? 'progress>=90%' : `seen ${consecutiveMediaFound} polls`;
-                const bestUrl = targetAsset || `flow-video-tile detected (${liveState.videoTileCount} tile(s))`;
-                console.log(`      ✨ GENERATION COMPLETED! ${liveState.videoTileCount > 0 ? liveState.videoTileCount + ' video tile(s)' : liveState.mediaUrls.length + ' asset(s)'} in ${elapsedSec}s. [${reason}]`);
+                const bestUrl = targetAsset || (isVideoType ? `flow-video-tile detected (${liveState.videoTileCount} tile(s))` : 'image asset detected');
+                console.log(`      ✨ GENERATION COMPLETED! ${isVideoType ? liveState.videoTileCount + ' video tile(s)' : liveState.mediaUrls.length + ' asset(s)'} in ${elapsedSec}s. [${reason}]`);
                 console.log(`      🔗 Result URL: ${bestUrl}`);
                 resultData = {
-                    videoUrl: isVideoType ? (liveState.videoUrl || null) : null,
-                    imageUrl: type === 'image' ? (liveState.imageUrl || liveState.thumbnailUrl) : null,
+                    videoUrl: isVideoType ? (liveState.videoUrl || liveState.thumbnailUrl || null) : null,
+                    imageUrl: !isVideoType ? (liveState.imageUrl || liveState.thumbnailUrl) : null,
                     thumbnailUrl: liveState.thumbnailUrl || null,
                     mediaUrls: liveState.mediaUrls,
                     videoTileCount: liveState.videoTileCount,
@@ -3522,7 +3543,7 @@ export class GoogleFxFlowTool extends BaseTool {
                             await page.waitForTimeout(400);
                         }
 
-                        // Find the 3-dot button in the top-right area of the video tile
+                        // Find the 3-dot button strictly in the top-right area of the video tile (no loose fallback to image tiles)
                         const menuBtnClicked = await page.evaluate(({ excludedUrls }) => {
                             const excluded = new Set(excludedUrls || []);
                             const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
@@ -3533,24 +3554,21 @@ export class GoogleFxFlowTool extends BaseTool {
                                 if (!img) return false;
                                 const src = img.getAttribute('src') || '';
                                 return src && !excluded.has(src) && !src.includes('googleusercontent.com') && !src.includes('gstatic');
-                            }) || tiles[tiles.length - 1] || null;
+                            }) || tiles[0] || null;
 
                             const tBox = tile ? tile.getBoundingClientRect() : null;
+                            if (!tBox) return false;
 
                             const btn = buttons.find(b => {
                                 if (!b.offsetWidth) return false;
                                 const r = b.getBoundingClientRect();
-                                if (tBox && (r.left < tBox.left || r.right > tBox.right + 20 || r.top < tBox.top - 10 || r.bottom > tBox.bottom)) {
+                                if (r.left < tBox.left || r.right > tBox.right + 20 || r.top < tBox.top - 10 || r.bottom > tBox.bottom) {
                                     return false;
                                 }
                                 const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
                                 const aria = (b.getAttribute('aria-label') || '').toLowerCase();
                                 return txt === 'more_vert' || txt === 'more_horiz' || txt === '⋮' ||
                                     aria.includes('more') || aria.includes('menu');
-                            }) || buttons.find(b => {
-                                if (!b.offsetWidth) return false;
-                                const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
-                                return txt === 'more_vert' || txt === '⋮';
                             });
 
                             if (btn) {
@@ -3593,14 +3611,18 @@ export class GoogleFxFlowTool extends BaseTool {
                                     return items.find(el => {
                                         if (!el.offsetWidth) return false;
                                         const txt = (el.innerText || el.textContent || '').trim();
-                                        return txt.includes('720p') || txt.includes('Original size');
+                                        return (txt.includes('720p') || txt.includes('Original size')) && !txt.includes('GIF');
+                                    }) || items.find(el => {
+                                        if (!el.offsetWidth) return false;
+                                        const txt = (el.innerText || el.textContent || '').trim();
+                                        return txt.includes('1080p');
                                     }) || null;
                                 });
 
                                 if (subItem720 && subItem720.asElement()) {
                                     console.log(`      📥 Found "720p (Original size)" option! Triggering browser download event...`);
                                     const [download] = await Promise.all([
-                                        page.waitForEvent('download', { timeout: 25000 }).catch(() => null),
+                                        page.waitForEvent('download', { timeout: 35000 }).catch(() => null),
                                         subItem720.asElement().click(),
                                     ]);
 
@@ -3638,7 +3660,7 @@ export class GoogleFxFlowTool extends BaseTool {
                                 console.warn(`      ⚠️ "Download" option not found in 3-dot menu`);
                             }
                         } else {
-                            console.warn(`      ⚠️ 3-dot menu button not found on video tile`);
+                            console.warn(`      ⚠️ 3-dot menu button not found directly on video tile`);
                         }
                     } catch (menuErr) {
                         console.warn(`      ⚠️ Layer 2 3-dot menu download error: ${menuErr.message}`);
@@ -3646,7 +3668,7 @@ export class GoogleFxFlowTool extends BaseTool {
                 }
 
                 // ─────────────────────────────────────────────────────────────
-                // LAYER 3: Click Play/Video Icon (▶) -> Open Editor/Player -> Toolbar Download
+                // LAYER 3: Click Play/Video Icon (▶) -> Open Editor/Player -> Toolbar Download 720p
                 // ─────────────────────────────────────────────────────────────
                 if (!downloaded) {
                     try {
@@ -3661,7 +3683,7 @@ export class GoogleFxFlowTool extends BaseTool {
                                 if (!img) return false;
                                 const src = img.getAttribute('src') || '';
                                 return src && !excluded.has(src) && !src.includes('googleusercontent.com') && !src.includes('gstatic');
-                            }) || tiles[tiles.length - 1] || null;
+                            }) || tiles[0] || null;
 
                             if (!tile) return false;
                             const tBox = tile.getBoundingClientRect();
@@ -3674,6 +3696,11 @@ export class GoogleFxFlowTool extends BaseTool {
                             });
                             if (playBtn) {
                                 playBtn.click();
+                                return true;
+                            }
+                            const innerImg = tile.querySelector('img');
+                            if (innerImg) {
+                                innerImg.click();
                                 return true;
                             }
                             tile.click();
@@ -3727,7 +3754,7 @@ export class GoogleFxFlowTool extends BaseTool {
                             }
 
                             if (!downloaded) {
-                                // Try toolbar download button in editor
+                                // Try toolbar download button in editor -> click it to open quality menu
                                 const editorDlBtn = await page.evaluateHandle(() => {
                                     const btns = Array.from(document.querySelectorAll('button, [role="button"], a'));
                                     return btns.find(b => {
@@ -3740,39 +3767,76 @@ export class GoogleFxFlowTool extends BaseTool {
                                 });
 
                                 if (editorDlBtn && editorDlBtn.asElement()) {
-                                    console.log(`      📥 Clicking toolbar download/export button in editor...`);
-                                    const [download] = await Promise.all([
-                                        page.waitForEvent('download', { timeout: 25000 }).catch(() => null),
-                                        editorDlBtn.asElement().click(),
-                                    ]);
+                                    console.log(`      📥 Clicking toolbar download/export button in editor to open options...`);
+                                    await editorDlBtn.asElement().click();
+                                    await page.waitForTimeout(800);
 
-                                    if (download) {
-                                        const suggested = download.suggestedFilename() || '';
-                                        console.log(`      📥 Editor toolbar download triggered: suggestedFilename="${suggested}"`);
-                                        if (/\.(png|jpe?g|webp|gif)$/i.test(suggested)) {
-                                            console.warn(`      ⚠️ Editor toolbar downloaded an IMAGE (${suggested}), not a video! Rejecting.`);
-                                        } else {
-                                            const filename = `flow_video_${Date.now()}.mp4`;
-                                            const localPath = path.join(downloadDir, filename);
-                                            await download.saveAs(localPath);
-                                            const fileBuf = readFileSync(localPath);
-                                            if (isVideoBuffer(fileBuf)) {
-                                                const localUrl = `http://localhost:${config.port || 5001}/downloads/${filename}`;
-                                                console.log(`      💾 ✅ Video verified and saved from editor toolbar: ${localPath} (${Math.round(fileBuf.length / 1024)}KB)`);
-                                                resultData.downloadPath = localPath;
-                                                resultData.downloadUrl = localUrl;
-                                                resultData.videoUrl = localUrl;
-                                                resultData.imageUrl = null;
-                                                resultData.filename = filename;
-                                                downloaded = true;
+                                    // Find "720p (Original size)" or "Original size" dropdown option
+                                    const subItem720 = await page.evaluateHandle(() => {
+                                        const items = Array.from(document.querySelectorAll('[role="menuitem"], [role="option"], button, li, div, span'));
+                                        return items.find(el => {
+                                            if (!el.offsetWidth) return false;
+                                            const txt = (el.innerText || el.textContent || '').trim();
+                                            return (txt.includes('720p') || txt.includes('Original size')) && !txt.includes('GIF');
+                                        }) || items.find(el => {
+                                            if (!el.offsetWidth) return false;
+                                            const txt = (el.innerText || el.textContent || '').trim();
+                                            return txt.includes('1080p');
+                                        }) || null;
+                                    });
+
+                                    if (subItem720 && subItem720.asElement()) {
+                                        console.log(`      📥 Found "720p (Original size)" dropdown option! Triggering browser download...`);
+                                        const [download] = await Promise.all([
+                                            page.waitForEvent('download', { timeout: 35000 }).catch(() => null),
+                                            subItem720.asElement().click(),
+                                        ]);
+
+                                        if (download) {
+                                            const suggested = download.suggestedFilename() || '';
+                                            console.log(`      📥 Editor toolbar download triggered: suggestedFilename="${suggested}"`);
+                                            if (/\.(png|jpe?g|webp|gif)$/i.test(suggested)) {
+                                                console.warn(`      ⚠️ Editor toolbar downloaded an IMAGE (${suggested}), not a video! Rejecting.`);
                                             } else {
-                                                console.warn(`      ⚠️ Editor toolbar downloaded file is NOT a valid video stream. Deleting ${localPath}.`);
-                                                try { unlinkSync(localPath); } catch {}
+                                                const filename = `flow_video_${Date.now()}.mp4`;
+                                                const localPath = path.join(downloadDir, filename);
+                                                await download.saveAs(localPath);
+                                                const fileBuf = readFileSync(localPath);
+                                                if (isVideoBuffer(fileBuf)) {
+                                                    const localUrl = `http://localhost:${config.port || 5001}/downloads/${filename}`;
+                                                    console.log(`      💾 ✅ Video verified and saved from editor toolbar 720p: ${localPath} (${Math.round(fileBuf.length / 1024)}KB)`);
+                                                    resultData.downloadPath = localPath;
+                                                    resultData.downloadUrl = localUrl;
+                                                    resultData.videoUrl = localUrl;
+                                                    resultData.imageUrl = null;
+                                                    resultData.filename = filename;
+                                                    downloaded = true;
+                                                } else {
+                                                    console.warn(`      ⚠️ Editor toolbar downloaded file is NOT a valid video stream. Deleting ${localPath}.`);
+                                                    try { unlinkSync(localPath); } catch {}
+                                                }
                                             }
+                                        } else {
+                                            console.warn(`      ⚠️ Download event not fired after clicking 720p in editor`);
                                         }
+                                    } else {
+                                        console.warn(`      ⚠️ "720p (Original size)" option not found in editor menu dropdown`);
                                     }
                                 }
                             }
+
+                            // Return back to project canvas cleanly
+                            try {
+                                await page.evaluate(() => {
+                                    const backBtn = Array.from(document.querySelectorAll('button, a')).find(b => {
+                                        const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+                                        const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
+                                        return aria.includes('back') || txt.includes('arrow_back') || txt.includes('back');
+                                    });
+                                    if (backBtn) backBtn.click();
+                                });
+                                await page.waitForTimeout(1000);
+                            } catch (e) {}
                         }
                     } catch (editorErr) {
                         console.warn(`      ⚠️ Layer 3 editor download error: ${editorErr.message}`);
