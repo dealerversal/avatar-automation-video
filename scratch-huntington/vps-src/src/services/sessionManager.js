@@ -251,10 +251,12 @@ export class SessionManager {
 
             await context.close();
 
-            const authenticated = hasGoogleCookies && !currentUrl.includes('accounts.google.com');
+            const hasUser = Boolean(user && (user.name || user.email));
+            const authenticated = Boolean(hasGoogleCookies && !currentUrl.includes('accounts.google.com') && hasUser);
 
             const result = {
                 authenticated,
+                isExpired: !hasUser && hasGoogleCookies,
                 url: currentUrl,
                 title: pageTitle,
                 user,
@@ -263,7 +265,9 @@ export class SessionManager {
                 lastVerified: new Date().toISOString(),
                 message: authenticated
                     ? 'Successfully authenticated with Google Flow!'
-                    : 'Not authenticated with Google. Please upload your browser-profile.zip.',
+                    : (!hasUser && hasGoogleCookies
+                        ? 'Google session expired or user not logged in. Please re-authenticate.'
+                        : 'Not authenticated with Google. Please upload your browser-profile.zip.'),
             };
 
             // Save to disk and memory cache
