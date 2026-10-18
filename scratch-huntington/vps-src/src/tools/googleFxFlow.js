@@ -3290,13 +3290,13 @@ export class GoogleFxFlowTool extends BaseTool {
 
                     // ── Increment stuck counter on every poll tick if progress >= 90% and not completed ──
                     // Only count as stuck if spinner/generating text is no longer active (DOM idle/hung),
-                    // or if total generation time has exceeded 2 minutes (120s)
+                    // or if total generation time has exceeded 4 minutes (240s)
                     if (!liveState.hasActiveSpinner && !liveState.isGeneratingText && (effectivePct >= 95 || (effectivePct === lastProgressPct && effectivePct >= 90))) {
                         stuckProgressCount++;
                         console.log(`      ⏳ Generation holding at ${effectivePct}% [stuck check ${stuckProgressCount}/10] (${elapsedSec}s)`);
-                    } else if (elapsedSec > 120) {
+                    } else if (elapsedSec > 240) {
                         stuckProgressCount++;
-                        console.log(`      ⏳ Generation exceeded 120s [stuck check ${stuckProgressCount}/10] (${elapsedSec}s)`);
+                        console.log(`      ⏳ Generation exceeded 240s [stuck check ${stuckProgressCount}/10] (${elapsedSec}s)`);
                     } else {
                         stuckProgressCount = 0;
                     }
@@ -3305,7 +3305,7 @@ export class GoogleFxFlowTool extends BaseTool {
                     lastActivityTime = Date.now();
                 }
             } else {
-                if (elapsedSec > 120) {
+                if (elapsedSec > 240) {
                     stuckProgressCount++;
                 }
             }
