@@ -44,11 +44,17 @@ export function triggerServerRestart(delayMs = 3000) {
                 logger.error(`[Restart] Error touching server file: ${touchErr.message}`);
             }
 
-            // 3. Fallback exit for standalone process supervisors
-            setTimeout(() => {
-                logger.info('[Restart] Exiting process cleanly for supervisor restart...');
-                process.exit(0);
-            }, 1000);
+            // 3. Fallback exit for standalone process supervisors (only when running under PM2 or supervisor)
+            const isPM2 = process.env.pm_id !== undefined || process.env.PM2_HOME !== undefined;
+            const enableExit = process.env.ENABLE_LOCAL_RESTART === 'true' || isPM2;
+            if (enableExit) {
+                setTimeout(() => {
+                    logger.info('[Restart] Exiting process cleanly for supervisor restart...');
+                    process.exit(0);
+                }, 1000);
+            } else {
+                logger.info('[Restart] Local standalone environment detected — keeping server process alive.');
+            }
         });
     }, delayMs);
 }
