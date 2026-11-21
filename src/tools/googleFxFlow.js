@@ -1,6 +1,7 @@
 // src/tools/googleFxFlow.js
 import { chromium } from 'playwright';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, createWriteStream, renameSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, createWriteStream, renameSync, copyFileSync } from 'fs';
+import { execSync } from 'child_process';
 import https from 'https';
 import http from 'http';
 import path from 'path';
@@ -16,6 +17,9 @@ const GOOGLE_FX_URL = 'https://flow.google.com/';
 
 let sharedContext = null;
 let isInitializing = false;
+let sharedProjectPage = null;
+let lastExtractedFramePath = null;
+let lastExtractedFrameUrl = null;
 
 export async function closeSharedContext() {
     if (sharedContext) {
@@ -348,8 +352,11 @@ export class GoogleFxFlowTool extends BaseTool {
         return str;
     }
 
-    async execute({ itemId, prompt, type = 'avatar_video', settings = {}, mediaUrl = null, imageUrl = null, avatarName = null, proxy = null }) {
-        const cleanPrompt = this._cleanPromptText(prompt);
+    async execute({ itemId, prompt, type = 'avatar_video', settings = {}, mediaUrl = null, imageUrl = null, avatarName = null, proxy = null, sceneNumber = 1, totalScenes = 1, previousSceneLastFrameUrl = null, isFirstScene = true }) {
+        let cleanPrompt = this._cleanPromptText(prompt);
+        if (sceneNumber === 1 && !cleanPrompt.toLowerCase().includes('scene 1') && !cleanPrompt.includes('generate video for scnee 1 only now')) {
+            cleanPrompt = `${cleanPrompt.trim()}\n\ngenerate video for scnee 1 only now`;
+        }
         const effectiveMediaUrl = mediaUrl || imageUrl || null;
         const effectiveAvatarName = (avatarName && String(avatarName).trim()) || 'me';
         const actualGenType = type === 'avatar_video' ? 'video' : type;
@@ -396,8 +403,64 @@ export class GoogleFxFlowTool extends BaseTool {
 
         let context = null;
         let page = null;
+        let result = null;
+        let totalMs = 0;
 
         try {
+            // ── Scene 2+: Reuse shared project page if available ──────────────────
+            if (sceneNumber > 1 && sharedProjectPage && !sharedProjectPage.isClosed()) {
+                console.log(`\n♻️  [Scene ${sceneNumber}/${totalScenes}] Reusing existing project page from scene 1...`);
+                page = sharedProjectPage;
+
+                // Ensure session drawer is open
+                await this._clickExpandButton(page);
+                await page.waitForTimeout(600);
+
+                // Step 1: Upload and attach the LAST FRAME of the previous scene [STEP 1/2]
+                const frameToAttach = previousSceneLastFrameUrl || lastExtractedFramePath || lastExtractedFrameUrl || effectiveMediaUrl;
+                console.log(`\n🖼️ [Scene ${sceneNumber}] [STEP 1/2] Attaching last frame of previous scene to prompt bar: ${frameToAttach}...`);
+                if (frameToAttach) {
+                    await this._uploadMediaFromUrl(page, frameToAttach, itemId);
+                    console.log(`      ✅ [Scene ${sceneNumber}] Attached previous scene last frame to prompt bar!`);
+                } else {
+                    console.warn(`      ⚠️ No last frame found for scene ${sceneNumber}!`);
+                }
+
+                // Step 2: Add account Avatar to prompt [STEP 2/2] (MANDATORY & REQUIRED)
+                if (effectiveAvatarName) {
+                    this._lastAvatarName = effectiveAvatarName;
+                    console.log(`\n👤 [Scene ${sceneNumber}] [STEP 2/2] Selecting Avatar "${effectiveAvatarName}" and adding to prompt...`);
+                    await this._clickExpandButton(page);
+                    await page.waitForTimeout(500);
+                    await this._addAvatarToPrompt(page, effectiveAvatarName);
+                }
+
+                // Step 3: Check prompt bar chips
+                await page.waitForTimeout(1000);
+                const chipsCount = await page.evaluate(() => {
+                    const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+                    return Array.from(document.querySelectorAll('button.chip-container, button[class*="chip-container"]')).filter(isVisible).length;
+                });
+                console.log(`      🔎 [Scene ${sceneNumber}] Prompt bar chips count: ${chipsCount} (Expected: Frame + Avatar)`);
+
+                // Step 4: Submit Scene prompt
+                const defaultNextScenePrompt = `Generate the Scene ${sceneNumber} video now, using the storyboard image and the final frame of the previous scene as the continuation reference. Refer to the reference image included in the images.`;
+                const scenePrompt = (cleanPrompt && !cleanPrompt.toLowerCase().includes('generate video scene number')) ? cleanPrompt : defaultNextScenePrompt;
+                this._lastPrompt = scenePrompt;
+                console.log(`\n⌨️ [Scene ${sceneNumber}] Submitting prompt into generation bar: "${scenePrompt}"...`);
+                const postSubmitUrls = await this._submitPrompt(page, scenePrompt);
+                console.log(`      ✅ [Scene ${sceneNumber}] Prompt submitted!`);
+
+                // Step 5: Extract result
+                const allExcludedUrls = Array.from(new Set([...(postSubmitUrls || [])]));
+                result = await this._extractResult(page, type, itemId, allExcludedUrls);
+
+                if (sceneNumber >= totalScenes) {
+                    sharedProjectPage = null;
+                }
+            } else {
+            // ── Scene 1 (or fallback): Full new project flow ──────────────────────
+
             console.log(`\n[1/5] 🚀 Getting shared browser context...`);
             context = await this._getSharedContext();
 
@@ -430,7 +493,7 @@ export class GoogleFxFlowTool extends BaseTool {
 
             // 2. Always click "New Project" button first (with multi-attempt new project retry if generation stalls)
             const MAX_PROJECT_ATTEMPTS = 3;
-            let result = null;
+            result = null;
 
             for (let projectAttempt = 1; projectAttempt <= MAX_PROJECT_ATTEMPTS; projectAttempt++) {
                 try {
@@ -451,25 +514,36 @@ export class GoogleFxFlowTool extends BaseTool {
                     let projectUrl = page.url();
                     console.log(`      ✅ New project opened: ${projectUrl}`);
 
-                    // Auto-handle OAuth consent screen if redirected to accounts.google.com
+                    // Auto-handle OAuth consent screen / account chooser if redirected to accounts.google.com
                     if (projectUrl.includes('accounts.google.com') || projectUrl.includes('signin') || projectUrl.includes('oauth')) {
-                        console.log(`      ⚠️ Redirected to OAuth authorization screen, attempting auto-continue...`);
+                        console.log(`      ⚠️ Redirected to Google account chooser / authorization screen...`);
                         try {
-                            const consentBtn = await page.$('button:has-text("Continue"), button:has-text("Confirm"), button:has-text("Allow"), [data-email]');
-                            if (consentBtn && (await consentBtn.isVisible())) {
-                                await consentBtn.click();
-                                console.log(`      👉 Auto-clicked OAuth consent/account button.`);
-                                await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => {});
-                                await page.waitForTimeout(3000);
-                                projectUrl = page.url();
-                                console.log(`      ✅ Redirected after consent: ${projectUrl}`);
+                            const accountItem = await page.$('li[data-identifier], div[data-identifier], [data-email], ul > li:has(img), button:has-text("Continue"), button:has-text("Confirm")');
+                            if (accountItem && (await accountItem.isVisible())) {
+                                await accountItem.click();
+                                console.log(`      👉 Clicked account / consent item.`);
                             }
                         } catch (e) {}
+
+                        // Wait for redirect back to Flow (or let user click in headful window)
+                        console.log(`      ⏳ Waiting up to 25s for redirect back to Google Flow...`);
+                        await page.waitForURL(url => !url.href.includes('accounts.google.com') && !url.href.includes('signin'), { timeout: 25000 }).catch(() => {});
+                        await page.waitForTimeout(3000);
+                        projectUrl = page.url();
+                        console.log(`      ✅ URL after account selection: ${projectUrl}`);
+                    }
+
+                    // If redirected to home/dashboard rather than project editor, ensure we enter/create a project
+                    if (!page.url().includes('/project/')) {
+                        console.log(`      ➕ Not yet inside project editor (${page.url()}) — clicking New Project to enter...`);
+                        await this._createNewProject(page, false);
+                        projectUrl = page.url();
+                        console.log(`      ✅ Project URL confirmed: ${projectUrl}`);
                     }
 
                     // Session check after project creation
                     if (projectUrl.includes('accounts.google.com') || projectUrl.includes('signin')) {
-                        throw new Error('Google session expired after project creation. Please re-login in the browser profile.');
+                        throw new Error('Google session requires login in browser. Please select account/log in in the open browser window.');
                     }
 
                     // 2b. Ensure "All Media" tab is active
@@ -498,58 +572,40 @@ export class GoogleFxFlowTool extends BaseTool {
                                 await page.waitForTimeout(800);
                             }
 
-                            // 4. Add account Avatar to prompt (MANDATORY & REQUIRED)
-                            this._lastAvatarName = effectiveAvatarName;
-                            console.log(`\n[4/7] 🔲 Ensuring session drawer is open before avatar selection... (attempt ${uploadAttempt})`);
-                            await this._clickExpandButton(page);
-                            await page.waitForTimeout(500);
-                            console.log(`      👤 [STEP 1/2] Selecting Avatar "${effectiveAvatarName}" and adding to prompt (REQUIRED)...`);
-                            await this._addAvatarToPrompt(page, effectiveAvatarName);
-
-                            // ── MANDATORY POST-CALL VERIFICATION ──────────────────────────────────
-                            // After _addAvatarToPrompt returns (even via early-return fast-path),
-                            // perform a final hard check that the avatar thumbnail is truly present
-                            // in the prompt bar. If not, throw immediately so queue retries cleanly.
-                            console.log(`      🔎 [POST-AVATAR CHECK] Performing mandatory final avatar verification in prompt bar...`);
-                            const avatarConfirmed = await page.evaluate(() => {
-                                const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
-                                const promptArea = Array.from(document.querySelectorAll('[role="textbox"], [contenteditable="true"], textarea'))
-                                    .find(el => isVisible(el) && el.getBoundingClientRect().left > window.innerWidth * 0.4);
-                                if (!promptArea) return false;
-                                let container = promptArea.parentElement;
-                                for (let i = 0; i < 10 && container; i++) {
-                                    const imgs = container.querySelectorAll('img');
-                                    const hasRealImg = Array.from(imgs).some(img => isVisible(img) && img.width > 16 && img.height > 16);
-                                    if (hasRealImg) return true;
-                                    container = container.parentElement;
-                                }
-                                // Fallback: any img in right+bottom quadrant of page (prompt thumbnail area)
-                                const rightBottomImgs = Array.from(document.querySelectorAll('img')).filter(img => {
-                                    if (!isVisible(img)) return false;
-                                    const r = img.getBoundingClientRect();
-                                    return r.left > window.innerWidth * 0.5 && r.top > window.innerHeight * 0.4 && img.width > 16;
-                                });
-                                return rightBottomImgs.length > 0;
-                            });
-                            if (!avatarConfirmed) {
-                                throw new Error(`[GoogleFX] ❌ MANDATORY AVATAR CHECK FAILED: Avatar "${effectiveAvatarName}" is NOT attached to the prompt bar after _addAvatarToPrompt returned. Project will FAIL INSTANTLY and go to retry.`);
-                            }
-                            console.log(`      ✅ [POST-AVATAR CHECK] Avatar "${effectiveAvatarName}" confirmed in prompt bar — proceeding.`);
-                            // ─────────────────────────────────────────────────────────────────────
-
-                            // 5. Upload reference image/media to prompt (RULE: Upload strictly ONCE per project)
+                            // 4. Upload reference storyboard image & add to prompt FIRST [STEP 1/2]
                             if (effectiveMediaUrl) {
                                 this._lastMediaUrl = effectiveMediaUrl;
                                 if (mediaUploadedInThisProject) {
-                                    console.log(`\n[5/7] ℹ️ [RULE] Reference image was already uploaded in this project (${uploadedMediaUrls.length} url(s)). Skipping re-upload on retry in same project.`);
+                                    console.log(`\n[4/7] ℹ️ [RULE] Reference image was already uploaded in this project (${uploadedMediaUrls.length} url(s)). Skipping re-upload on retry in same project.`);
                                 } else {
-                                    console.log(`\n[5/7] 🖼️ [STEP 2/2] Uploading reference media from URL... (attempt ${uploadAttempt}/${MAX_UPLOAD_RETRIES + 1})`);
+                                    console.log(`\n[4/7] 🖼️ [STEP 1/2] Uploading reference storyboard image and adding to prompt... (attempt ${uploadAttempt}/${MAX_UPLOAD_RETRIES + 1})`);
                                     uploadedMediaUrls = await this._uploadMediaFromUrl(page, effectiveMediaUrl, itemId);
                                     mediaUploadedInThisProject = true;
                                     this._mediaUploadedInCurrentProject = true;
                                     console.log(`      🔒 Uploaded media URLs captured for exclusion: ${uploadedMediaUrls.length}`);
                                 }
                             }
+
+                            // 5. Add account Avatar to prompt SECOND [STEP 2/2] (MANDATORY & REQUIRED)
+                            this._lastAvatarName = effectiveAvatarName;
+                            console.log(`\n[5/7] 👤 [STEP 2/2] Selecting Avatar "${effectiveAvatarName}" and adding to prompt (REQUIRED)...`);
+                            await this._clickExpandButton(page);
+                            await page.waitForTimeout(500);
+                            await this._addAvatarToPrompt(page, effectiveAvatarName);
+
+                            // ── MANDATORY POST-CALL VERIFICATION ──────────────────────────────────
+                            console.log(`      🔎 [POST-AVATAR CHECK] Performing mandatory final avatar verification in prompt bar...`);
+                            const avatarConfirmed = await page.evaluate(() => {
+                                const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+                                const chips = Array.from(document.querySelectorAll('button.chip-container, button[class*="chip-container"]')).filter(isVisible);
+                                // STRICT REQUIREMENT: Storyboard (chip 1) AND Avatar (chip 2) must BOTH be present!
+                                return chips.length >= 2;
+                            });
+                            if (!avatarConfirmed) {
+                                throw new Error(`[GoogleFX] ❌ MANDATORY AVATAR CHECK FAILED: Both Storyboard and Avatar "${effectiveAvatarName}" must be attached (found < 2 chips in prompt bar).`);
+                            }
+                            console.log(`      ✅ [POST-AVATAR CHECK] Both Storyboard and Avatar "${effectiveAvatarName}" confirmed in prompt bar (chips >= 2) — proceeding.`);
+                            // ─────────────────────────────────────────────────────────────────────
 
                             // Success — break out of retry loop
                             break;
@@ -604,6 +660,16 @@ export class GoogleFxFlowTool extends BaseTool {
                     // 8. Poll and Extract Results & Download Local Asset
                     console.log(`\n[8/8] ⏳ Polling for ${type} generation completion, downloading asset & saving locally...`);
                     result = await this._extractResult(page, type, itemId, allExcludedUrls);
+
+                    // Preserve last frame of scene 1 for subsequent scenes in same project
+                    if (totalScenes > 1) {
+                        console.log(`\n📸 [Scene 1/${totalScenes}] Preserving last frame for next scene...`);
+                        if (result && (result.lastFrameUrl || result.lastFramePath)) {
+                            console.log(`      ✅ Last frame ready for scene 2: ${result.lastFrameUrl || result.lastFramePath}`);
+                        }
+                        sharedProjectPage = page;
+                    }
+
                     break; // SUCCESS! Break out of project attempt loop
                 } catch (projErr) {
                     if (projErr.message && projErr.message.includes('STUCK_AT_95_NEW_PROJECT_REQUIRED')) {
@@ -629,12 +695,13 @@ export class GoogleFxFlowTool extends BaseTool {
                     throw projErr;
                 }
             }
+            }
 
             if (!result) {
                 throw new Error('[GoogleFX] ❌ Failed to generate video across all project attempts.');
             }
 
-            const totalMs = Date.now() - execStart;
+            totalMs = Date.now() - execStart;
             console.log('\n' + '─'.repeat(60));
             console.log(`✅  [GoogleFxFlowTool] GENERATION COMPLETED!`);
             console.log(`⏱️   Time      : ${totalMs}ms`);
@@ -695,18 +762,30 @@ export class GoogleFxFlowTool extends BaseTool {
             console.error(`[GoogleFX] ❌ Execution error: ${err.message}`);
             throw err;
         } finally {
-            if (page && !page.isClosed()) {
-                try {
-                    await page.close();
-                    console.log(`      🔒 Browser tab closed cleanly.`);
-                } catch (closeErr) {
-                    console.warn(`      ⚠️ Warning closing browser tab: ${closeErr.message}`);
+            const isLastScene = sceneNumber >= totalScenes;
+            if (isLastScene) {
+                if (config.browser.headless) {
+                    if (page && !page.isClosed()) {
+                        try {
+                            await page.close();
+                            console.log(`      🔒 Browser tab closed cleanly.`);
+                        } catch (closeErr) {
+                            console.warn(`      ⚠️ Warning closing browser tab: ${closeErr.message}`);
+                        }
+                    }
+                    try {
+                        await closeSharedContext();
+                    } catch (closeContextErr) {
+                        console.warn(`      ⚠️ Warning closing shared browser context: ${closeContextErr.message}`);
+                    }
+                } else {
+                    console.log(`      📌 Headful mode: keeping browser open so you can view the final result.`);
                 }
-            }
-            try {
-                await closeSharedContext();
-            } catch (closeContextErr) {
-                console.warn(`      ⚠️ Warning closing shared browser context: ${closeContextErr.message}`);
+                sharedProjectPage = null;
+            } else if (sharedProjectPage) {
+                console.log(`      📌 Keeping project page open for next scene (${sceneNumber + 1}/${totalScenes})...`);
+            } else {
+                console.log(`      📌 Multi-scene flow in progress — keeping browser open.`);
             }
         }
     }
@@ -721,17 +800,25 @@ export class GoogleFxFlowTool extends BaseTool {
             await this._dismissOverlays(page);
         }
 
+        if (page.url().includes('/about')) {
+            console.log(`      ℹ️ Landed on /about page, clicking Create to get to studio...`);
+            const createLnk = await page.$('button:has-text("Create"), a:has-text("Create")');
+            if (createLnk && (await createLnk.isVisible())) {
+                await createLnk.click();
+                await page.waitForTimeout(3000);
+                await this._dismissOverlays(page);
+            }
+        }
+
         const newProjectSelectors = [
+            'button.new-project-button',
             'button:has-text("New project")',
             'button:has-text("New Project")',
-            'a:has-text("New project")',
-            'a:has-text("New Project")',
-            'button:has-text("+ New")',
-            'button:has-text("Create")',
-            'button:has-text("Start")',
             '[aria-label*="new project" i]',
             '[class*="new-project"]',
-            'a[href*="project"]',
+            'a:has-text("New project")',
+            'button:has-text("+ New")',
+            'button:has-text("Start")',
         ];
 
         let clicked = false;
@@ -742,7 +829,6 @@ export class GoogleFxFlowTool extends BaseTool {
                     await btn.click();
                     clicked = true;
                     console.log(`      ➕ Clicked "New Project" button: ${sel}`);
-                    await page.waitForTimeout(3000);
                     break;
                 }
             } catch {}
@@ -753,17 +839,24 @@ export class GoogleFxFlowTool extends BaseTool {
             const buttons = await page.$$('button, a');
             for (const btn of buttons) {
                 const text = (await btn.innerText()).toLowerCase();
-                if (text.includes('new project') || text.includes('create') || text.includes('try flow') || text.includes('open studio')) {
+                if (text.includes('new project') || text.includes('try flow') || text.includes('open studio')) {
                     await btn.click();
                     clicked = true;
                     console.log(`      ➕ Clicked CTA button for New Project: "${text.trim()}"`);
-                    await page.waitForTimeout(3000);
                     break;
                 }
             }
         }
 
-        if (!clicked) {
+        if (clicked) {
+            try {
+                await page.waitForURL(url => url.pathname.includes('/project/'), { timeout: 25000 });
+                console.log(`      ✅ Successfully entered project: ${page.url()}`);
+            } catch (waitErr) {
+                console.warn(`      ⚠️ Waiting for /project/ URL: current is ${page.url()}`);
+            }
+            await page.waitForTimeout(3000);
+        } else {
             console.log(`      ℹ️ Already inside project or New Project button auto-triggered`);
         }
     }
@@ -1123,6 +1216,10 @@ export class GoogleFxFlowTool extends BaseTool {
         try {
             console.log(`      ⚙️ Opening Agent Settings panel for type="${type}": ${JSON.stringify(settings)}`);
 
+            // Ensure Agent panel is expanded first
+            await this._clickExpandButton(page);
+            await page.waitForTimeout(600);
+
             // Ensure any media panel is closed first (press Escape to close if open)
             await page.evaluate(() => {
                 const isMediaPanelOpen = Array.from(document.querySelectorAll('input[placeholder]'))
@@ -1135,10 +1232,12 @@ export class GoogleFxFlowTool extends BaseTool {
 
             // ── STEP 1: Check if Agent Settings panel is already open ────────────
             let panelOpened = await page.evaluate(() => {
-                const textPresent = (document.body.innerText || '').includes('Agent settings');
-                const saveBtn = Array.from(document.querySelectorAll('button'))
-                    .some(b => b.offsetWidth > 0 && (b.innerText || '').trim() === 'Save');
-                return textPresent || saveBtn;
+                const textPresent = (document.body.innerText || '').includes('Confirm before generating') ||
+                    (document.body.innerText || '').includes('Video generation default') ||
+                    (document.body.innerText || '').includes('Image generation default');
+                const hasNeverToggle = Array.from(document.querySelectorAll('mat-button-toggle, [role="radio"]'))
+                    .some(el => (el.innerText || el.textContent || '').toLowerCase().includes('never'));
+                return textPresent || hasNeverToggle;
             });
 
             // ── STEP 2: Find & Click Settings Button ─────────────────────────────
@@ -1149,43 +1248,50 @@ export class GoogleFxFlowTool extends BaseTool {
                     const coords = await page.evaluate(() => {
                         const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
 
-                        // STRATEGY 1: "tune" button INSIDE the agent prompt bar (bottom of right panel).
-                        // NOTE: the top-right gear also has aria-label="Settings" but opens global settings,
-                        // NOT "Agent settings" — so we only accept buttons in the lower-right prompt bar.
+                        // STRATEGY 1 (NEW UI): button[aria-label="Agent settings"] in Agent panel header
+                        const agentSettingsBtn = Array.from(document.querySelectorAll('button')).find(b => {
+                            if (!isVisible(b)) return false;
+                            const aria = (b.getAttribute('aria-label') || '').toLowerCase().trim();
+                            return aria === 'agent settings';
+                        });
+                        if (agentSettingsBtn) {
+                            if (window.__highlight) window.__highlight(agentSettingsBtn);
+                            const r = agentSettingsBtn.getBoundingClientRect();
+                            return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2), strategy: 'button[aria-label="Agent settings"]' };
+                        }
+
+                        // STRATEGY 2: settings_2 icon in Agent panel header (top < 150, right half)
+                        const headerSettingsBtn = Array.from(document.querySelectorAll('button')).find(b => {
+                            if (!isVisible(b)) return false;
+                            const r = b.getBoundingClientRect();
+                            if (r.top > 150 || r.left < window.innerWidth * 0.5) return false;
+                            const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
+                            const aria = (b.getAttribute('aria-label') || '').toLowerCase().trim();
+                            return txt.includes('settings_2') || aria.includes('setting');
+                        });
+                        if (headerSettingsBtn) {
+                            if (window.__highlight) window.__highlight(headerSettingsBtn);
+                            const r = headerSettingsBtn.getBoundingClientRect();
+                            return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2), strategy: 'header-settings_2-button' };
+                        }
+
+                        // STRATEGY 3: "tune" button inside prompt bar (legacy UI)
                         const inPromptBar = b => {
                             const r = b.getBoundingClientRect();
                             return r.left > window.innerWidth * 0.5 && r.top > window.innerHeight * 0.6;
                         };
-                        const notHeader = b => b.getBoundingClientRect().top > window.innerHeight * 0.15;
-                        const isGear = b => b.classList.contains('mat-mdc-menu-trigger') ||
-                            (b.innerText || b.textContent || '').toLowerCase().includes('settings_2');
-                        const isTuneBtn = b => {
-                            if (!isVisible(b) || !notHeader(b) || isGear(b)) return false;
+                        const tuneBtns = Array.from(document.querySelectorAll('button, [role="button"]')).filter(b => {
+                            if (!isVisible(b)) return false;
                             const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
-                            if (txt === 'tune') return true;
-                            return Array.from(b.querySelectorAll('mat-icon, .material-icons, .google-symbols, span, i'))
-                                .some(el => (el.textContent || '').trim().toLowerCase() === 'tune');
-                        };
-                        const tuneBtns = Array.from(document.querySelectorAll('button, [role="button"]')).filter(isTuneBtn);
-                        // Prefer the one in the lower-right prompt bar; otherwise the lowest one on screen
-                        let btn = Array.from(document.querySelectorAll('.agent-input-actions button.agent-action-button')).find(b =>
-                            isVisible(b) && !isGear(b) && (b.getAttribute('aria-label') || '').toLowerCase().trim() === 'settings') ||
-                            tuneBtns.find(inPromptBar) ||
-                            tuneBtns.sort((a, b) => b.getBoundingClientRect().top - a.getBoundingClientRect().top)[0] || null;
-
-                        // Fallback: "Settings" aria-label button, but ONLY outside the header (never the top-right gear)
-                        if (!btn) {
-                            btn = Array.from(document.querySelectorAll('button, [role="button"]')).find(b =>
-                                isVisible(b) && notHeader(b) && inPromptBar(b) &&
-                                (b.getAttribute('aria-label') || '').toLowerCase().trim() === 'settings') || null;
+                            return txt === 'tune' || Array.from(b.querySelectorAll('*')).some(el => (el.textContent || '').trim().toLowerCase() === 'tune');
+                        });
+                        const tuneBtn = tuneBtns.find(inPromptBar) || tuneBtns[0];
+                        if (tuneBtn) {
+                            if (window.__highlight) window.__highlight(tuneBtn);
+                            const r = tuneBtn.getBoundingClientRect();
+                            return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2), strategy: 'tune-button' };
                         }
 
-                        if (btn) {
-                            if (window.__highlight) window.__highlight(btn);
-                            btn.scrollIntoView({ block: 'center', inline: 'nearest' });
-                            const r = btn.getBoundingClientRect();
-                            return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2), strategy: btn.getAttribute('aria-label') || btn.textContent?.trim()?.substring(0, 20) };
-                        }
                         return null;
                     });
 
@@ -1198,9 +1304,12 @@ export class GoogleFxFlowTool extends BaseTool {
                     await page.waitForTimeout(1200);
 
                     panelOpened = await page.evaluate(() => {
-                        const textPresent = (document.body.innerText || '').includes('Agent settings');
-                        const saveBtn = Array.from(document.querySelectorAll('button')).some(b => b.offsetWidth > 0 && (b.innerText || '').trim() === 'Save');
-                        return textPresent || saveBtn;
+                        const textPresent = (document.body.innerText || '').includes('Confirm before generating') ||
+                            (document.body.innerText || '').includes('Video generation default') ||
+                            (document.body.innerText || '').includes('Image generation default');
+                        const hasNeverToggle = Array.from(document.querySelectorAll('mat-button-toggle, [role="radio"]'))
+                            .some(el => (el.innerText || el.textContent || '').toLowerCase().includes('never'));
+                        return textPresent || hasNeverToggle;
                     });
 
                     if (panelOpened) {
@@ -1216,17 +1325,28 @@ export class GoogleFxFlowTool extends BaseTool {
             }
 
             // ── STEP 3: ALWAYS force "Confirm before generating" → Never ─────────
-            // This is MANDATORY — without it, Flow pauses and waits for human approval on every generation.
-            // DOM: <input type="radio" class="mdc-radio__native-control" id="mat-radio-1-input"> (Never)
-            // Selected state check: input.checked === true (NOT data-state/aria-checked — those are unreliable)
+            // In the new UI, this uses mat-button-toggle ("Always", "Never")
             console.log(`      🔴 [MANDATORY] Forcing "Confirm before generating" → Never...`);
             let neverConfirmed = false;
 
             for (let attempt = 1; attempt <= 5; attempt++) {
                 // First: check if Never is already selected
                 const isAlreadyNever = await page.evaluate(() => {
-                    const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
-                    // Find the "Never" native radio input — look for the one whose sibling label text includes "Never"
+                    // Check mat-button-toggle (new UI)
+                    const toggles = Array.from(document.querySelectorAll('mat-button-toggle, [role="radio"]'));
+                    const neverToggle = toggles.find(t => (t.innerText || t.textContent || '').toLowerCase().includes('never'));
+                    if (neverToggle) {
+                        if (neverToggle.classList.contains('mat-button-toggle-checked') ||
+                            neverToggle.getAttribute('aria-pressed') === 'true' ||
+                            neverToggle.getAttribute('aria-checked') === 'true') {
+                            return true;
+                        }
+                        const innerBtn = neverToggle.querySelector('button');
+                        if (innerBtn && (innerBtn.getAttribute('aria-pressed') === 'true' || innerBtn.getAttribute('aria-checked') === 'true')) {
+                            return true;
+                        }
+                    }
+                    // Legacy radio inputs
                     const allNativeRadios = Array.from(document.querySelectorAll('input[type="radio"].mdc-radio__native-control, input[type="radio"]'));
                     for (const radio of allNativeRadios) {
                         const label = radio.closest('label') || radio.closest('.mdc-form-field') || radio.parentElement;
@@ -1235,9 +1355,7 @@ export class GoogleFxFlowTool extends BaseTool {
                             return radio.checked === true;
                         }
                     }
-                    // Fallback: 2nd radio = Never (Always=first, Never=second)
-                    const radios = allNativeRadios.filter(r => isVisible(r) || true); // native radios may be hidden by CSS
-                    return radios.length >= 2 ? radios[1].checked === true : false;
+                    return false;
                 });
 
                 if (isAlreadyNever) {
@@ -1246,57 +1364,38 @@ export class GoogleFxFlowTool extends BaseTool {
                     break;
                 }
 
-                // Find the Never label/element and click it (multiple strategies)
+                // Find Never toggle / button and click it
                 const clickCoords = await page.evaluate(() => {
                     const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
 
-                    // Strategy A: Find label wrapping the "Never" native radio — click the label
-                    const allLabels = Array.from(document.querySelectorAll('label.mdc-form-field, label.mat-internal-form-field, label'));
-                    const neverLabel = allLabels.find(label => {
-                        const txt = (label.innerText || label.textContent || '').toLowerCase();
-                        return txt.includes('never') && txt.length < 200; // not a huge container
-                    });
-                    if (neverLabel) {
-                        neverLabel.click();
-                        const r = neverLabel.getBoundingClientRect();
-                        return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2), via: 'label' };
+                    // Strategy A: mat-button-toggle containing Never (new UI)
+                    const toggles = Array.from(document.querySelectorAll('mat-button-toggle, [role="radio"]'));
+                    const neverToggle = toggles.find(t => isVisible(t) && (t.innerText || t.textContent || '').toLowerCase().includes('never'));
+                    if (neverToggle) {
+                        const clickEl = neverToggle.querySelector('button') || neverToggle;
+                        clickEl.click();
+                        const r = clickEl.getBoundingClientRect();
+                        return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2), via: 'mat-button-toggle' };
                     }
 
-                    // Strategy B: Click the native radio input itself
-                    const allNativeRadios = Array.from(document.querySelectorAll('input[type="radio"].mdc-radio__native-control, input[type="radio"]'));
+                    // Strategy B: Button or span with text Never
+                    const allButtons = Array.from(document.querySelectorAll('button, span')).filter(isVisible);
+                    const neverBtn = allButtons.find(b => (b.innerText || b.textContent || '').trim().toLowerCase().startsWith('never'));
+                    if (neverBtn) {
+                        neverBtn.click();
+                        const r = neverBtn.getBoundingClientRect();
+                        return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2), via: 'button-never' };
+                    }
+
+                    // Strategy C: Legacy native radio input
+                    const allNativeRadios = Array.from(document.querySelectorAll('input[type="radio"]'));
                     for (const radio of allNativeRadios) {
-                        const label = radio.closest('label') || radio.closest('.mdc-form-field') || radio.parentElement;
-                        const labelText = (label?.innerText || label?.textContent || '').toLowerCase();
-                        if (labelText.includes('never')) {
+                        const label = radio.closest('label') || radio.parentElement;
+                        if ((label?.innerText || '').toLowerCase().includes('never')) {
                             radio.click();
-                            const r = radio.getBoundingClientRect();
-                            // If rect is zero (hidden), use parent label rect
-                            const rect = (r.width > 0 && r.height > 0) ? r : label?.getBoundingClientRect();
-                            return { cx: Math.round(rect.left + rect.width / 2), cy: Math.round(rect.top + rect.height / 2), via: 'native-radio' };
+                            const r = label.getBoundingClientRect();
+                            return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2), via: 'legacy-radio' };
                         }
-                    }
-
-                    // Strategy C: [role="radio"] elements — pick the "Never" one
-                    const roleRadios = Array.from(document.querySelectorAll('[role="radio"]'));
-                    const neverRole = roleRadios.find(r => (r.innerText || r.textContent || '').toLowerCase().includes('never'));
-                    if (neverRole) {
-                        neverRole.click();
-                        const r = neverRole.getBoundingClientRect();
-                        return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2), via: 'role-radio' };
-                    }
-
-                    // Strategy D: Any span/div with exactly "Never" text — click its parent
-                    const allSpans = Array.from(document.querySelectorAll('span, div'));
-                    const neverSpan = allSpans.find(el => {
-                        if (!isVisible(el)) return false;
-                        const txt = (el.innerText || el.textContent || '').trim();
-                        return txt === 'Never';
-                    });
-                    if (neverSpan) {
-                        const target = neverSpan.closest('label') || neverSpan.closest('[role="radio"]') || neverSpan;
-                        target.click();
-                        const r = target.getBoundingClientRect();
-                        return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2), via: 'span-text' };
                     }
 
                     return null;
@@ -1306,21 +1405,31 @@ export class GoogleFxFlowTool extends BaseTool {
                     console.log(`      🖱️ Clicking "Never" at [${clickCoords.cx}, ${clickCoords.cy}] (attempt ${attempt}/5, via: ${clickCoords.via})`);
                     try { await page.mouse.click(clickCoords.cx, clickCoords.cy); } catch {}
                 } else {
-                    console.warn(`      ⚠️ "Never" radio element not found on attempt ${attempt}/5`);
+                    console.warn(`      ⚠️ "Never" toggle element not found on attempt ${attempt}/5`);
                 }
                 await page.waitForTimeout(600);
 
-                // Verify using .checked property — the reliable native DOM state
+                // Verify
                 neverConfirmed = await page.evaluate(() => {
-                    const allNativeRadios = Array.from(document.querySelectorAll('input[type="radio"].mdc-radio__native-control, input[type="radio"]'));
-                    for (const radio of allNativeRadios) {
-                        const label = radio.closest('label') || radio.closest('.mdc-form-field') || radio.parentElement;
-                        const labelText = (label?.innerText || label?.textContent || '').toLowerCase();
-                        if (labelText.includes('never')) return radio.checked === true;
+                    const toggles = Array.from(document.querySelectorAll('mat-button-toggle, [role="radio"]'));
+                    const neverToggle = toggles.find(t => (t.innerText || t.textContent || '').toLowerCase().includes('never'));
+                    if (neverToggle) {
+                        if (neverToggle.classList.contains('mat-button-toggle-checked') ||
+                            neverToggle.getAttribute('aria-pressed') === 'true' ||
+                            neverToggle.getAttribute('aria-checked') === 'true') {
+                            return true;
+                        }
+                        const innerBtn = neverToggle.querySelector('button');
+                        if (innerBtn && (innerBtn.getAttribute('aria-pressed') === 'true' || innerBtn.getAttribute('aria-checked') === 'true')) {
+                            return true;
+                        }
                     }
-                    // Fallback: 2nd radio = Never
-                    const radios = allNativeRadios;
-                    return radios.length >= 2 ? radios[1].checked === true : false;
+                    const allNativeRadios = Array.from(document.querySelectorAll('input[type="radio"]'));
+                    for (const radio of allNativeRadios) {
+                        const label = radio.closest('label') || radio.parentElement;
+                        if ((label?.innerText || '').toLowerCase().includes('never')) return radio.checked === true;
+                    }
+                    return false;
                 });
 
                 if (neverConfirmed) {
@@ -1335,281 +1444,65 @@ export class GoogleFxFlowTool extends BaseTool {
             }
 
 
-            // ── STEP 4: Target Section ("Video generation default") & Apply Settings ───────
-            const isVideoJob = type === 'video' || type === 'avatar_video';
-            const arVal = settings.aspectRatio || settings.aspect_ratio || settings.ratio || '9:16';
-            const targetAr = String(arVal).trim();
-
-            // HARDCODED: count/multiplier is ALWAYS x1 as requested by user
-            const targetCountText = 'x1';
-
-            const rawModelStr = String(settings.model || 'Omni 1.1 Flash').trim();
-
-            const normalizeModel = (m, isVid) => {
-                const l = m.toLowerCase();
-                if (!isVid) {
-                    if (l.includes('banana 2') || l.includes('nano 2') || l.includes('banana')) return 'Nano Banana 2';
-                    if (l.includes('imagen')) return 'Imagen 3';
-                } else {
-                    if (l.includes('omni') || l.includes('flash') || l.includes('1.1')) return 'Omni 1.1 Flash';
-                    if (l.includes('veo 3.1 - lite') || l.includes('lite')) return 'Veo 3.1 - Lite';
-                    if (l.includes('veo 3.1 - fast') || l.includes('fast')) return 'Veo 3.1 - Fast';
-                    if (l.includes('veo 3.1 - quality') || l.includes('quality')) return 'Veo 3.1 - Quality';
-                }
-                return m;
-            };
-            const targetModelName = normalizeModel(rawModelStr, isVideoJob);
-
-            // 4a. Isolate section container & click Aspect Ratio pill (9:16) via physical mouse click
-            const arCoords = await page.evaluate(({ isVid, targetAr }) => {
-                const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
-                const targetTitle = isVid ? 'video generation default' : 'image generation default';
-                const allMatching = Array.from(document.querySelectorAll('*')).filter(el => {
-                    if (!isVisible(el)) return false;
-                    const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
-                    return txt === targetTitle;
-                });
-                const headingEl = allMatching.sort((a, b) => (a.innerText || '').length - (b.innerText || '').length)[0];
-                
-                let container = headingEl ? headingEl.parentElement : document.body;
-                while (container && container !== document.body) {
-                    const btns = container.querySelectorAll('button');
-                    if (btns.length >= 2 && container.clientHeight < window.innerHeight * 0.8) break;
-                    container = container.parentElement;
-                }
-                if (!container) container = document.body;
-
-                container.scrollIntoView({ block: 'center' });
-
-                const pills = Array.from(container.querySelectorAll('button')).filter(p => isVisible(p));
-                const arPill = pills.find(p => {
-                    const txt = (p.innerText || p.textContent || '').trim();
-                    return txt === targetAr || txt.endsWith(targetAr) || txt.includes(targetAr);
-                });
-
-                if (arPill) {
-                    if (window.__highlight) window.__highlight(arPill);
-                    const r = arPill.getBoundingClientRect();
-                    return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2) };
-                }
-                return null;
-            }, { isVid: isVideoJob, targetAr });
-
-            if (arCoords && arCoords.cx > 0 && arCoords.cy > 0) {
-                console.log(`      🖱️ Mouse clicking Aspect Ratio "${targetAr}" at [${arCoords.cx}, ${arCoords.cy}]...`);
-                try { await page.mouse.click(arCoords.cx, arCoords.cy); } catch {}
-                console.log(`      ✅ Selected Aspect Ratio "${targetAr}" in ${isVideoJob ? 'Video' : 'Image'} generation default`);
-            } else {
-                console.warn(`      ⚠️ Could not locate Aspect Ratio pill "${targetAr}" in section`);
-            }
-            await page.waitForTimeout(1000);
-
-            // 4b. Count Selection (Hardcoded x1) via physical mouse click
-            const countCoords = await page.evaluate(({ isVid, targetCountText }) => {
-                const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
-                const targetTitle = isVid ? 'video generation default' : 'image generation default';
-                const allMatching = Array.from(document.querySelectorAll('*')).filter(el => {
-                    if (!isVisible(el)) return false;
-                    const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
-                    return txt === targetTitle;
-                });
-                const headingEl = allMatching.sort((a, b) => (a.innerText || '').length - (b.innerText || '').length)[0];
-                let container = headingEl ? headingEl.parentElement : document.body;
-                while (container && container !== document.body) {
-                    const btns = container.querySelectorAll('button');
-                    if (btns.length >= 2 && container.clientHeight < window.innerHeight * 0.8) break;
-                    container = container.parentElement;
-                }
-                if (!container) container = document.body;
-
-                const countTab = Array.from(container.querySelectorAll('button')).find(b => {
-                    if (!isVisible(b)) return false;
-                    const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
-                    return txt === targetCountText;
-                });
-                if (countTab) {
-                    if (window.__highlight) window.__highlight(countTab);
-                    const r = countTab.getBoundingClientRect();
-                    return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2) };
-                }
-                return null;
-            }, { isVid: isVideoJob, targetCountText });
-
-            if (countCoords && countCoords.cx > 0 && countCoords.cy > 0) {
-                console.log(`      🖱️ Mouse clicking Count "${targetCountText}" at [${countCoords.cx}, ${countCoords.cy}]...`);
-                try { await page.mouse.click(countCoords.cx, countCoords.cy); } catch {}
-                console.log(`      ✅ Selected Count "${targetCountText}" (hardcoded) in ${isVideoJob ? 'Video' : 'Image'} generation default`);
-            } else {
-                console.warn(`      ⚠️ Could not locate Count button "${targetCountText}" in section`);
-            }
-            await page.waitForTimeout(1000);
-
-            // 4c. Model Dropdown Selection via physical mouse click
-            const dropdownState = await page.evaluate(({ isVid, targetModelName }) => {
-                const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
-                const targetTitle = isVid ? 'video generation default' : 'image generation default';
-                const allMatching = Array.from(document.querySelectorAll('*')).filter(el => {
-                    if (!isVisible(el)) return false;
-                    const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
-                    return txt === targetTitle;
-                });
-                const headingEl = allMatching.sort((a, b) => (a.innerText || '').length - (b.innerText || '').length)[0];
-                let container = headingEl ? headingEl.parentElement : document.body;
-                while (container && container !== document.body) {
-                    const btns = container.querySelectorAll('button');
-                    if (btns.length >= 2 && container.clientHeight < window.innerHeight * 0.8) break;
-                    container = container.parentElement;
-                }
-                if (!container) container = document.body;
-
-                const dropdownBtn = Array.from(container.querySelectorAll('button')).find(b => {
-                    if (!isVisible(b)) return false;
-                    const txt = (b.innerText || b.textContent || '').trim();
-                    const hasIcon = Array.from(b.querySelectorAll('*')).some(el => (el.textContent || '').trim() === 'arrow_drop_down');
-                    return hasIcon || txt.includes('Omni') || txt.includes('Banana') || txt.includes('Veo');
-                });
-
-                if (dropdownBtn) {
-                    const btnText = (dropdownBtn.innerText || dropdownBtn.textContent || '').trim();
-                    const btnTextLower = btnText.toLowerCase();
-                    const targetLower = targetModelName.toLowerCase();
-                    const isAlreadySelected = btnTextLower.includes(targetLower) ||
-                        (targetLower.includes('omni') && (btnTextLower.includes('omni') || btnTextLower.includes('flash'))) ||
-                        (targetLower.includes('banana') && btnTextLower.includes('banana'));
-
-                    if (window.__highlight) window.__highlight(dropdownBtn);
-                    const r = dropdownBtn.getBoundingClientRect();
-                    return {
-                        cx: Math.round(r.left + r.width / 2),
-                        cy: Math.round(r.top + r.height / 2),
-                        currentText: btnText,
-                        isAlreadySelected,
-                    };
-                }
-                return null;
-            }, { isVid: isVideoJob, targetModelName });
-
-            if (dropdownState && dropdownState.cx > 0 && dropdownState.cy > 0) {
-                if (dropdownState.isAlreadySelected) {
-                    console.log(`      ✅ Model is already set to "${dropdownState.currentText}" (matches target "${targetModelName}")`);
-                } else {
-                    console.log(`      🖱️ Mouse clicking Model dropdown (current: "${dropdownState.currentText}") at [${dropdownState.cx}, ${dropdownState.cy}]...`);
-                    try { await page.mouse.click(dropdownState.cx, dropdownState.cy); } catch {}
-                    await page.waitForTimeout(1200);
-
-                    const optionCoords = await page.evaluate((modelName) => {
-                        const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
-                        const searchLower = modelName.toLowerCase();
-                        const options = Array.from(document.querySelectorAll('button[role="menuitem"], [role="option"], [role="menuitemradio"], [role="menuitemcheckbox"], [data-radix-collection-item], button, div, li, span'))
-                            .filter(el => isVisible(el) && (el.innerText || el.textContent || '').trim().length > 0 && (el.innerText || el.textContent || '').trim().length < 60);
-
-                        // 1. Exact match
-                        let match = options.find(el => {
-                            const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
-                            return txt === searchLower;
-                        });
-
-                        // 2. Contains full target name
-                        if (!match) {
-                            match = options.find(el => {
-                                const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
-                                return txt.includes(searchLower);
-                            });
-                        }
-
-                        // 3. Match Omni / Flash / 1.1 variations
-                        if (!match && (searchLower.includes('omni') || searchLower.includes('flash'))) {
-                            match = options.find(el => {
-                                const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
-                                return txt.includes('omni') && txt.includes('flash');
-                            }) || options.find(el => {
-                                const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
-                                return txt.includes('omni');
-                            });
-                        }
-
-                        // 4. Match Nano Banana / Imagen
-                        if (!match && (searchLower.includes('banana') || searchLower.includes('nano'))) {
-                            match = options.find(el => {
-                                const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
-                                return txt.includes('banana') || txt.includes('nano');
-                            });
-                        }
-
-                        // 5. Match Veo
-                        if (!match && searchLower.includes('veo')) {
-                            match = options.find(el => {
-                                const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
-                                return txt.includes('veo');
-                            });
-                        }
-
-                        if (match) {
-                            const clickTarget = match.closest('button, [role="menuitem"], [role="option"], [data-radix-collection-item]') || match;
-                            if (window.__highlight) window.__highlight(clickTarget);
-                            const r = clickTarget.getBoundingClientRect();
-                            return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2) };
-                        }
-                        return null;
-                    }, targetModelName);
-
-                    if (optionCoords && optionCoords.cx > 0 && optionCoords.cy > 0) {
-                        console.log(`      🖱️ Mouse clicking Model option "${targetModelName}" at [${optionCoords.cx}, ${optionCoords.cy}]...`);
-                        try { await page.mouse.click(optionCoords.cx, optionCoords.cy); } catch {}
-                        console.log(`      ✅ Selected Model "${targetModelName}" for ${isVideoJob ? 'Video' : 'Image'} generation default`);
-                    } else {
-                        console.warn(`      ⚠️ Model option "${targetModelName}" not found in dropdown menu — keeping default "${dropdownState.currentText}"`);
-                    }
-                }
-            } else {
-                console.warn(`      ⚠️ Could not locate Model dropdown in ${isVideoJob ? 'Video' : 'Image'} generation default`);
-            }
-            await page.waitForTimeout(1000);
-
-            // 4d. Duration Pill Selection — SKIPPED.
-            // Duration is embedded directly in the prompt text (e.g. "Duration: 8 seconds")
-            // by the prompt builder and dynamically assigned per scene (6s / 8s / 10s)
-            // based on the scene's voiceover word count. No fixed UI pill interaction needed.
-
-            // ── STEP 5: Click Save Button ───────────────────────────────────────
+            // ── STEP 5: Save / Close Settings Drawer ───────────────────────────
             let saveConfirmed = false;
-            for (let saveAttempt = 1; saveAttempt <= 3; saveAttempt++) {
-                const saveCoords = await page.evaluate(() => {
+            for (let closeAttempt = 1; closeAttempt <= 3; closeAttempt++) {
+                const closed = await page.evaluate(() => {
                     const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
-                    const allBtns = Array.from(document.querySelectorAll('button'));
-                    let saveBtn = allBtns.find(b => isVisible(b) && (b.className || '').includes('sc-b9afcbbb-16'));
-                    if (!saveBtn) saveBtn = allBtns.find(b => isVisible(b) && (b.innerText || b.textContent || '').trim() === 'Save');
+                    const allBtns = Array.from(document.querySelectorAll('button')).filter(isVisible);
 
-                    if (saveBtn) {
-                        if (window.__highlight) window.__highlight(saveBtn);
-                        saveBtn.click();
-                        const r = saveBtn.getBoundingClientRect();
-                        return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2) };
+                    // PRIORITY 1: Click Back (arrow_back) button in the settings drawer header
+                    const backBtn = allBtns.find(b => {
+                        const r = b.getBoundingClientRect();
+                        if (r.top > 150 || r.left < window.innerWidth * 0.5) return false;
+                        const txt = (b.innerText || b.textContent || '').trim();
+                        const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+                        return txt === 'arrow_back' || aria.includes('back');
+                    });
+                    if (backBtn) {
+                        backBtn.click();
+                        return 'clicked_arrow_back';
                     }
+
+                    // PRIORITY 2: If a Save button exists, click it
+                    let saveBtn = allBtns.find(b => (b.innerText || b.textContent || '').trim() === 'Save');
+                    if (saveBtn) {
+                        saveBtn.click();
+                        return 'clicked_save';
+                    }
+
+                    // PRIORITY 3: Toggle off Agent settings button
+                    const agentSettingsBtn = allBtns.find(b => {
+                        const r = b.getBoundingClientRect();
+                        return r.top < 150 && (b.getAttribute('aria-label') || '').toLowerCase().trim() === 'agent settings';
+                    });
+                    if (agentSettingsBtn) {
+                        agentSettingsBtn.click();
+                        return 'clicked_agent_settings_toggle';
+                    }
+
                     return null;
                 });
 
-                if (saveCoords && saveCoords.cx > 0 && saveCoords.cy > 0) {
-                    try { await page.mouse.click(saveCoords.cx, saveCoords.cy); } catch {}
+                if (closed) {
+                    console.log(`      ✅ Settings drawer closed via ${closed}`);
                 }
                 await page.waitForTimeout(800);
 
                 saveConfirmed = await page.evaluate(() => {
-                    const textPresent = (document.body.innerText || '').includes('Agent settings');
+                    const textPresent = (document.body.innerText || '').includes('Confirm before generating');
                     return !textPresent;
                 });
 
                 if (saveConfirmed) {
-                    console.log(`      ✅ Save verified — settings panel closed cleanly`);
+                    console.log(`      ✅ Settings drawer confirmed closed cleanly`);
                     break;
                 }
             }
 
-            if (!saveConfirmed) {
-                console.warn(`      ⚠️ Settings drawer still open after 3 Save attempts — pressing Escape to close`);
-                await page.keyboard.press('Escape');
-            }
-            await page.waitForTimeout(1500);
+            // Always ensure the right-side Agent panel is expanded and ready
+            await this._clickExpandButton(page);
+            await page.waitForTimeout(600);
 
         } catch (err) {
             console.warn(`      ⚠️ Apply settings error: ${err.message}`);
@@ -1628,13 +1521,11 @@ export class GoogleFxFlowTool extends BaseTool {
     async _openMediaPanel(page) {
         console.log(`      📂 Ensuring media drawer is open...`);
 
-        // Check if media drawer is ALREADY open ("Search assets" placeholder visible)
+        // Check if media drawer is ALREADY open
         const isPanelAlreadyOpen = await page.evaluate(() => {
             const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
-            return Array.from(document.querySelectorAll('input[placeholder]')).some(i => {
-                if (!isVisible(i)) return false;
-                return (i.getAttribute('placeholder') || '').toLowerCase().includes('search assets');
-            });
+            const popover = document.querySelector('flow-add-menu-popover-content, [class*="add-menu-popover"]');
+            return !!popover && isVisible(popover);
         });
 
         if (isPanelAlreadyOpen) {
@@ -1642,91 +1533,103 @@ export class GoogleFxFlowTool extends BaseTool {
             return true;
         }
 
-        for (let attempt = 1; attempt <= 5; attempt++) {
-            // The Expand button opens the Agent panel on the RIGHT side of the screen.
-            // The '+' (add_2/Create) button is in the BOTTOM of that right-side panel.
-            // Right panel: x > ~1180px, bottom bar: y > ~700px (in 1470x776 viewport)
-            const coords = await safeEvaluate(page, () => {
+        for (let attempt = 1; attempt <= 4; attempt++) {
+            const coords = await page.evaluate(() => {
                 const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
-                const allBtns = Array.from(document.querySelectorAll('button, [role="button"]'));
+                const isNotChip = b => {
+                    const cls = (b.className || '').toLowerCase();
+                    const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+                    if (cls.includes('chip') || aria.includes('ingredient') || aria.includes('remove') || aria.includes('close')) return false;
+                    return true;
+                };
 
-                // Primary: find '+'/add_2/Create button in the right-side Agent panel
-                // Thresholds relaxed (0.4 / 0.6) for VPS headless Chromium where layout shifts
-                let addBtn = allBtns.find(b => {
-                    if (!isVisible(b)) return false;
-                    const r = b.getBoundingClientRect();
-                    // Must be in RIGHT portion of screen (Agent panel) AND bottom area (panel bottom bar)
-                    if (r.left < window.innerWidth * 0.4) return false;
-                    if (r.top < window.innerHeight * 0.65) return false;
-                    const txt = (b.innerText || b.textContent || '').trim();
-                    return txt.includes('add_2') || txt === '+' || txt.includes('Create');
-                });
-
-                // Fallback 1: any '+' button in the right-side panel (relaxed y position)
-                if (!addBtn) {
-                    addBtn = allBtns.find(b => {
-                        if (!isVisible(b)) return false;
-                        const r = b.getBoundingClientRect();
-                        if (r.left < window.innerWidth * 0.4) return false;
-                        if (r.top < window.innerHeight * 0.55) return false;
-                        const cls = (b.className || '');
-                        return cls.includes('sc-e8425ea6-0') || (b.textContent || '').trim() === '+';
-                    });
+                // Priority 1: Exact aria-label
+                const addByAria = document.querySelector('button[aria-label="Add ingredients to the prompt box"]');
+                if (addByAria && isVisible(addByAria)) {
+                    const r = addByAria.getBoundingClientRect();
+                    return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2), name: 'aria-button' };
                 }
 
-                // Fallback 2: find by traversing from the right-side textarea
-                if (!addBtn) {
-                    const rightTextbox = Array.from(document.querySelectorAll('textarea, [role="textbox"], [contenteditable="true"]'))
-                        .find(el => {
-                            if (!isVisible(el)) return false;
-                            const r = el.getBoundingClientRect();
-                            return r.left > window.innerWidth * 0.6;
+                // Priority 2: Button with add_2 icon
+                const allBtns = Array.from(document.querySelectorAll('button, [role="button"]')).filter(b => isVisible(b) && isNotChip(b));
+                const addByIcon = allBtns.find(b => {
+                    const txt = (b.innerText || b.textContent || '').trim();
+                    const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+                    return txt === 'add_2' || txt.includes('add_2') || aria.includes('add ingredient');
+                });
+                if (addByIcon) {
+                    const r = addByIcon.getBoundingClientRect();
+                    return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2), name: 'icon-button' };
+                }
+
+                // Priority 3: Fallback button near prompt bar
+                const rightTextbox = Array.from(document.querySelectorAll('textarea, [role="textbox"], [contenteditable="true"]'))
+                    .find(el => isVisible(el) && el.getBoundingClientRect().left > window.innerWidth * 0.4);
+                if (rightTextbox) {
+                    let parent = rightTextbox.parentElement;
+                    for (let i = 0; i < 6 && parent; i++) {
+                        const candidateBtns = Array.from(parent.querySelectorAll('button')).filter(b => {
+                            if (!isVisible(b) || !isNotChip(b)) return false;
+                            const r = b.getBoundingClientRect();
+                            return r.left > window.innerWidth * 0.4 && r.top > window.innerHeight * 0.65;
                         });
-                    if (rightTextbox) {
-                        let parent = rightTextbox.parentElement;
-                        for (let i = 0; i < 10 && parent; i++) {
-                            const btns = Array.from(parent.querySelectorAll('button')).filter(b => {
-                                if (!isVisible(b)) return false;
-                                const r = b.getBoundingClientRect();
-                                return r.left > window.innerWidth * 0.6 && r.top > window.innerHeight * 0.7;
-                            });
-                            if (btns.length >= 1) { addBtn = btns[0]; break; }
-                            parent = parent.parentElement;
+                        const plusBtn = candidateBtns.find(b => {
+                            const txt = (b.innerText || b.textContent || '').trim();
+                            return txt === '+' || txt === 'add_2' || (b.getAttribute('aria-label') || '').includes('add');
+                        });
+                        if (plusBtn) {
+                            const r = plusBtn.getBoundingClientRect();
+                            return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2), name: 'nearby-plus-btn' };
                         }
+                        parent = parent.parentElement;
                     }
                 }
 
-                if (addBtn) {
-                    const r = addBtn.getBoundingClientRect();
-                    return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2) };
-                }
                 return null;
             });
 
             if (coords) {
-                console.log(`      🖱️ Clicked "+" button at [${coords.cx}, ${coords.cy}] (attempt ${attempt}/5)...`);
+                console.log(`      🖱️ Clicked "${coords.name}" (+) button at [${coords.cx}, ${coords.cy}] (attempt ${attempt}/4)...`);
                 try { await page.mouse.click(coords.cx, coords.cy); } catch {}
-                await page.waitForTimeout(2000);
+                await page.waitForTimeout(1500);
 
-                const panelOpen = await safeEvaluate(page, () => {
-                    return Array.from(document.querySelectorAll('input[placeholder]')).some(i =>
-                        i.offsetWidth > 0 && (i.getAttribute('placeholder') || '').toLowerCase().includes('search assets')
-                    );
+                const panelOpen = await page.evaluate(() => {
+                    const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+                    const popover = document.querySelector('flow-add-menu-popover-content, [class*="add-menu-popover"]');
+                    return !!popover && isVisible(popover);
                 });
 
                 if (panelOpen) {
                     console.log(`      ✅ Media drawer opened successfully!`);
                     return true;
                 }
-            } else {
-                console.warn(`      ⚠️ "+" button not found in attempt ${attempt}/5`);
             }
+
             await page.waitForTimeout(1000);
         }
 
 
         console.warn('[GoogleFX] ⚠️ Could not open media drawer via "+" button.');
         return false;
+    }
+
+    /**
+     * Switches tab in the ingredients popover (e.g. 'Images', 'Avatars', 'Uploads')
+     */
+    async _switchMediaTab(page, tabName) {
+        console.log(`      📂 Switching to "${tabName}" tab in ingredients popover...`);
+        const switched = await page.evaluate((targetTab) => {
+            const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+            const tabs = Array.from(document.querySelectorAll('mat-list-item[role="tab"], [role="tab"], mat-list-item')).filter(isVisible);
+            const match = tabs.find(t => (t.innerText || '').toLowerCase().includes(targetTab.toLowerCase()));
+            if (match) {
+                match.click();
+                return true;
+            }
+            return false;
+        }, tabName);
+        await page.waitForTimeout(1000);
+        return switched;
     }
 
     /**
@@ -1848,20 +1751,35 @@ export class GoogleFxFlowTool extends BaseTool {
             });
         };
 
-        const mediaInfo = await fetchAndDetectMedia(mediaUrl);
-        const { tmpPath, mediaType, ext, contentType } = mediaInfo;
-
-        console.log(`      ⬇️ Downloaded reference ${mediaType.toUpperCase()} [MIME: ${contentType || 'n/a'}, Ext: .${ext}]: ${mediaUrl}`);
-        console.log(`      ✅ Media saved to temp file: ${tmpPath}`);
+        let tmpPath, mediaType, ext, contentType;
+        if (typeof mediaUrl === 'string' && existsSync(mediaUrl)) {
+            tmpPath = mediaUrl;
+            ext = path.extname(mediaUrl).replace('.', '').toLowerCase() || 'jpg';
+            mediaType = ['mp4', 'mov', 'webm'].includes(ext) ? 'video' : 'image';
+            contentType = mediaType === 'video' ? `video/${ext}` : `image/${ext}`;
+            console.log(`      📁 Using existing local reference file [${mediaType.toUpperCase()}, .${ext}]: ${tmpPath}`);
+        } else {
+            const mediaInfo = await fetchAndDetectMedia(mediaUrl);
+            tmpPath = mediaInfo.tmpPath;
+            mediaType = mediaInfo.mediaType;
+            ext = mediaInfo.ext;
+            contentType = mediaInfo.contentType;
+            console.log(`      ⬇️ Downloaded reference ${mediaType.toUpperCase()} [MIME: ${contentType || 'n/a'}, Ext: .${ext}]: ${mediaUrl}`);
+            console.log(`      ✅ Media saved to temp file: ${tmpPath}`);
+        }
 
         // ── Step 2: Open Media Drawer via "+ Create" button ──────
         console.log(`      📂 Opening media panel via _openMediaPanel helper...`);
         const panelOpened = await this._openMediaPanel(page);
         if (!panelOpened) {
-            try { if (existsSync(tmpPath)) unlinkSync(tmpPath); } catch {}
+            try { if (tmpPath !== mediaUrl && existsSync(tmpPath)) unlinkSync(tmpPath); } catch {}
             throw new Error(`[GoogleFX] ❌ Could not open media panel to upload file.`);
         }
 
+        await page.waitForTimeout(1000);
+
+        // Switch to "Images" tab before uploading
+        await this._switchMediaTab(page, 'Images');
         await page.waitForTimeout(1000);
 
         // ── Step 3: Click "Upload media" button via filechooser event ─────────
@@ -2023,308 +1941,120 @@ export class GoogleFxFlowTool extends BaseTool {
                     console.log(`      ℹ️ No "Trim to upload" dialog — image file or dialog skipped`);
                 }
 
-                // ── Real-Time UI Upload & Processing Progress Tracking ─────────
-                // PHASE 1: Monitors background video/image upload until 100% / loaders clear.
-                console.log(`      ⏳ Real-Time UI Tracking: Monitoring background upload...`);
-                let uploadCompletedInUI = false;
+                // ── Real-Time UI Upload Progress Tracking (Wait 100% Upload) ─────────
+                console.log(`      ⏳ Real-Time UI Tracking: Monitoring background upload until 100% complete...`);
                 let uploadDoneInBackground = false;
                 const uploadStartTime = Date.now();
-                let lastActivityTime = Date.now();
-                let lastProgressPct = -1;
-                let uploadStarted = false;
-                let sawProgress = false;
+                const targetFilename = path.basename(tmpPath);
 
-                // Wait up to 20s for upload indicator to start in UI
-                for (let waitStart = 0; waitStart < 13 && !uploadStarted; waitStart++) {
-                    const hasStarted = await page.evaluate(() => {
+                for (let wait = 1; wait <= 40; wait++) {
+                    await page.waitForTimeout(1000);
+                    const uploadState = await page.evaluate((fname) => {
                         const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
-                        const bodyText = document.body ? document.body.innerText || '' : '';
+                        const popover = document.querySelector('flow-add-menu-popover-content');
+                        if (!popover) return { isUploading: true, hasFinishedItem: false };
+                        const items = Array.from(popover.querySelectorAll('button.asset-item, [role="option"]')).filter(isVisible);
+                        const uploadingItem = items.find(it => (it.innerText || '').toLowerCase().includes('uploading'));
+                        const finishedItem = items.find(it => {
+                            const txt = (it.innerText || '').toLowerCase();
+                            return (txt.includes(fname.toLowerCase()) || txt.includes('storyboard') || txt.includes('upload_ref')) && !txt.includes('uploading');
+                        });
+                        const progress = document.querySelector('[role="progressbar"], mat-progress-bar, progress');
+                        return {
+                            isUploading: !!uploadingItem || !!progress,
+                            hasFinishedItem: !!finishedItem,
+                            itemsText: items.map(it => (it.innerText || '').trim().replace(/\n/g, ' '))
+                        };
+                    }, targetFilename);
 
-                        if (/\d{1,3}\s*%/.test(bodyText)) return true;
-
-                        const loader = document.querySelector('[role="progressbar"], progress, [class*="progress"], [class*="spinner"], svg[class*="loading"], [class*="loader"], [class*="overlay"]');
-                        if (loader && isVisible(loader)) return true;
-
-                        return bodyText.includes('Uploading') || bodyText.includes('uploading') || bodyText.includes('Processing') || bodyText.includes('processing') || bodyText.includes('Transcoding');
-                    });
-
-                    if (hasStarted) {
-                        uploadStarted = true;
-                        sawProgress = true;
-                        console.log(`      ✅ Upload activity detected in UI (${waitStart * 1.5}s elapsed)`);
-                        break;
-                    }
-                    await page.waitForTimeout(1500);
-                }
-
-                const maxStaleMs = 300000; // 5 minutes max
-                let pollCount = 0;
-                let staleLoaderSec = 0; // tracks seconds of loader:YES with no percentage (headless false positive)
-                while (Date.now() - lastActivityTime < maxStaleMs) {
                     const elapsedSec = Math.round((Date.now() - uploadStartTime) / 1000);
-                    pollCount++;
-
-                    const uiState = await page.evaluate(() => {
-                        const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
-                        const bodyText = document.body ? document.body.innerText || '' : '';
-
-                        // Percentage progress (e.g., 5%, 50%, 99%)
-                        const pctMatches = bodyText.match(/(\d{1,3})\s*%/g);
-                        let currentPct = null;
-                        if (pctMatches) {
-                            for (const m of pctMatches) {
-                                const v = parseInt(m.replace('%', '').trim(), 10);
-                                if (v >= 0 && v <= 100) { currentPct = v; break; }
-                            }
-                        }
-
-                        // Active loaders/spinners
-                        // NOTE: Do NOT use 'svg circle' — it matches decorative icons and is always present in Google Flow!
-                        const hasLoader = Array.from(document.querySelectorAll(
-                            '[role="progressbar"], progress, [class*="progress-bar"], [class*="spinner"], mat-progress-bar, mat-spinner'
-                        )).some(el => isVisible(el) && el.getBoundingClientRect().width > 5);
-
-                        // Processing status text
-                        const isProcessing = bodyText.includes('Uploading') || bodyText.includes('uploading') ||
-                            bodyText.includes('Processing') || bodyText.includes('processing') ||
-                            bodyText.includes('Transcoding') || bodyText.includes('Saving');
-
-                        // Clear/remove prompt button already present in prompt bar
-                        const clearBtn = Array.from(document.querySelectorAll('button')).find(b => {
-                            if (!isVisible(b)) return false;
-                            const txt = (b.innerText || b.textContent || '').toLowerCase();
-                            const aria = (b.getAttribute('aria-label') || '').toLowerCase();
-                            return txt.includes('clear prompt') || aria.includes('clear prompt') || aria.includes('remove asset');
-                        });
-
-                        // Also check for media thumbnail in prompt bar
-                        const hasThumb = Array.from(document.querySelectorAll('img, video')).some(el => {
-                            if (!isVisible(el)) return false;
-                            const r = el.getBoundingClientRect();
-                            // Small thumbnail area in bottom prompt bar
-                            return r.top > window.innerHeight - 150 && r.width > 20 && r.width < 150;
-                        });
-
-                        return { currentPct, hasLoader, isProcessing, isAttached: !!clearBtn || hasThumb };
-                    });
-
-                    // ── Always log every poll so user sees upload progress ──
-                    const pctStr = uiState.currentPct !== null ? `${uiState.currentPct}%` : '--';
-                    const loaderStr = uiState.hasLoader ? 'loader:YES' : 'loader:no';
-                    const procStr = uiState.isProcessing ? 'processing:YES' : '';
-                    const attachStr = uiState.isAttached ? '✅ ATTACHED' : '';
-                    console.log(`      📊 Upload [${elapsedSec}s] pct=${pctStr} ${loaderStr} ${procStr} ${attachStr}`.trimEnd());
-
-                    if (uiState.isAttached) {
-                        console.log(`      ✅ Media attached to prompt bar! (${elapsedSec}s)`);
-                        uploadCompletedInUI = true;
-                        break;
-                    }
-
-                    // Track activity & report live progress percentage in console + DB
-                    if (uiState.currentPct !== null) {
-                        sawProgress = true;
-                        if (uiState.currentPct !== lastProgressPct) {
-                            lastProgressPct = uiState.currentPct;
-                            lastActivityTime = Date.now();
-                            staleLoaderSec = 0; // reset stale counter on real progress
-                            if (itemId) {
-                                try {
-                                    const jobsCol = getJobsCollection();
-                                    await jobsCol.updateOne({ itemId }, { $set: {
-                                        progressPct: uiState.currentPct,
-                                        progressStatus: `Uploading reference media (${uiState.currentPct}%)...`,
-                                        updatedAt: new Date(),
-                                    }});
-                                } catch (e) {}
-                            }
-                        }
-                    } else if (uiState.hasLoader || uiState.isProcessing) {
-                        sawProgress = true;
-                        // NOTE: Do NOT reset lastActivityTime unconditionally here — in headless mode
-                        // hasLoader is a false-positive (always true) and would prevent the loop from ever exiting!
-                        // Only reset if pct was recently seen (real loader activity).
-                        if (elapsedSec <= 10 || uiState.isProcessing) {
-                            lastActivityTime = Date.now();
-                        }
-                        staleLoaderSec += 1.5; // each poll is ~1.5s
-                    } else {
-                        staleLoaderSec = 0;
-                    }
-
-                    // ── STRICT UPLOADING COMPLETION RULES ──
-                    // 1. CANNOT BE DONE if percentage is currently active (0% - 99%)
-                    // 2. CANNOT BE DONE if loaders or processing text are active
-                    // 3. DONE if currentPct === 100
-                    // 4. DONE if pct disappeared after sawProgress AND no loader AND elapsedSec >= 8
-                    // 5. DONE if loader stuck true for 45+ seconds with no pct (headless false positive)
-                    // 6. For long videos where no % text was rendered, MUST wait at least 35s before completing!
-                    let isUploadDone = false;
-
-                    if (uiState.currentPct === 100) {
-                        isUploadDone = true;
-                    } else if (uiState.currentPct === null && !uiState.hasLoader && !uiState.isProcessing) {
-                        if (sawProgress && elapsedSec >= 8) {
-                            isUploadDone = true;
-                        } else if (!sawProgress && elapsedSec >= 35) {
-                            isUploadDone = true;
-                        }
-                    } else if (staleLoaderSec >= 45 && sawProgress && uiState.currentPct === null) {
-                        // Headless false positive: loader stuck true with no percentage for 45s
-                        // Upload actually completed but the loader indicator never cleared
-                        console.log(`      ⚠️ Stale loader detected (${Math.round(staleLoaderSec)}s no progress) — treating upload as completed.`);
-                        isUploadDone = true;
-                    }
-
-                    if (isUploadDone) {
-                        console.log(`      ✅ Background upload completed in UI (${elapsedSec}s elapsed) — now attaching media to prompt...`);
+                    if (uploadState.hasFinishedItem && !uploadState.isUploading) {
+                        console.log(`      ✅ Image upload 100% completed in UI (${elapsedSec}s elapsed)!`);
                         uploadDoneInBackground = true;
                         break;
                     }
-
-                    await page.waitForTimeout(1500);
-                }
-
-                if (uploadCompletedInUI) {
-                    // Already attached — skip Phase 2
-                } else if (!uploadDoneInBackground) {
-                    try { if (existsSync(tmpPath)) unlinkSync(tmpPath); } catch {}
-                    throw new Error(`[GoogleFX] ❌ Media upload timed out or stalled.`);
-                } else {
-                    // ── PHASE 2: Ensure panel open → Select asset → Click "Add to Prompt" ──
-                    console.log(`      📂 Phase 2: Opening media panel and adding asset to prompt...`);
-
-                    let phase2Success = false;
-                    for (let poll = 1; poll <= 20 && !phase2Success; poll++) {
-                        // 1. Check current panel state using exact dialog & button indicators
-                        const panelState = await page.evaluate(() => {
-                            const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
-
-                            // Check for "Add to Prompt" button on screen
-                            const addBtn = Array.from(document.querySelectorAll('button')).find(b => {
-                                if (!isVisible(b)) return false;
-                                const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
-                                return txt === 'add to prompt' || txt.includes('add to prompt');
-                            });
-                            if (addBtn) {
-                                const r = addBtn.getBoundingClientRect();
-                                return { isOpen: true, hasAddBtn: true, addBtnCx: Math.round(r.left + r.width / 2), addBtnCy: Math.round(r.top + r.height / 2) };
-                            }
-
-                            // Check for role="dialog" or popover tabs (Uploads, Images, Videos)
-                            const dialog = document.querySelector('[role="dialog"]');
-                            const hasDialog = dialog && isVisible(dialog);
-                            const hasTabs = Array.from(document.querySelectorAll('button, [role="tab"]')).some(b => {
-                                if (!isVisible(b)) return false;
-                                const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
-                                return txt === 'uploads' || txt === 'images' || txt === 'videos' || txt.includes('upload media');
-                            });
-
-                            return { isOpen: hasDialog || hasTabs, hasAddBtn: false, addBtnCx: null, addBtnCy: null };
-                        });
-
-                        // 2. If "Add to Prompt" button is ALREADY visible -> CLICK IT IMMEDIATELY!
-                        if (panelState.hasAddBtn && panelState.addBtnCx !== null) {
-                            console.log(`      🖱️ Clicking "Add to Prompt" button at [${panelState.addBtnCx}, ${panelState.addBtnCy}]...`);
-                            try { await page.mouse.click(panelState.addBtnCx, panelState.addBtnCy); } catch {}
-                            await page.waitForTimeout(2000);
-                            phase2Success = true;
-                            uploadCompletedInUI = true;
-                            break;
-                        }
-
-                        // 3. If panel is NOT open -> click the + button near prompt input ONCE
-                        if (!panelState.isOpen) {
-                            const plusBtnCoords = await page.evaluate(() => {
-                                const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
-                                // Target exact trigger button: aria-haspopup="dialog" or icon text "add_2" / "Create"
-                                const plusBtn = Array.from(document.querySelectorAll('button')).find(b => {
-                                    if (!isVisible(b)) return false;
-                                    const txt = (b.innerText || b.textContent || '').toLowerCase();
-                                    const aria = (b.getAttribute('aria-haspopup') || '').toLowerCase();
-                                    const r = b.getBoundingClientRect();
-                                    return (aria === 'dialog' || txt.includes('add_2') || txt.includes('create')) && r.top > 500 && r.width < 65;
-                                });
-                                if (plusBtn) {
-                                    const r = plusBtn.getBoundingClientRect();
-                                    return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2) };
-                                }
-                                return null;
-                            });
-
-                            if (plusBtnCoords) {
-                                console.log(`      🖱️ Opening media panel via + button at [${plusBtnCoords.cx}, ${plusBtnCoords.cy}]...`);
-                                try { await page.mouse.click(plusBtnCoords.cx, plusBtnCoords.cy); } catch {}
-                                await page.waitForTimeout(2000);
-                                continue; // poll again now that panel is open
-                            }
-                        }
-
-                        // 4. Panel is open but "Add to Prompt" not visible -> select an asset card in panel
-                        const cardCoords = await page.evaluate(() => {
-                            const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
-                            // Target asset option card inside role="dialog" or with role="option"
-                            const cards = Array.from(document.querySelectorAll('[role="option"], [role="listitem"], div')).filter(el => {
-                                if (!isVisible(el)) return false;
-                                const r = el.getBoundingClientRect();
-                                if (r.left < 300 || r.left > 1100 || r.top < 50 || r.top > 650) return false;
-                                if (r.width < 40 || r.height < 30) return false;
-                                const txt = (el.innerText || el.textContent || '').toLowerCase();
-                                return txt.includes('upload_ref') || txt.includes('video') || txt.includes('image') || el.getAttribute('role') === 'option';
-                            });
-
-                            if (cards.length > 0) {
-                                cards.sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);
-                                const r = cards[0].getBoundingClientRect();
-                                return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2) };
-                            }
-                            return null;
-                        });
-
-                        if (cardCoords) {
-                            console.log(`      🖱️ Selecting asset option card at [${cardCoords.cx}, ${cardCoords.cy}] in media panel (poll ${poll}/20)...`);
-                            try { await page.mouse.click(cardCoords.cx, cardCoords.cy); } catch {}
-                            await page.waitForTimeout(1500);
-
-                            // Re-check for "Add to Prompt" button
-                            const retryAddBtn = await page.evaluate(() => {
-                                const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
-                                const addBtn = Array.from(document.querySelectorAll('button')).find(b => {
-                                    if (!isVisible(b)) return false;
-                                    const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
-                                    return txt === 'add to prompt' || txt.includes('add to prompt');
-                                });
-                                if (addBtn) {
-                                    const r = addBtn.getBoundingClientRect();
-                                    return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2) };
-                                }
-                                return null;
-                            });
-
-                            if (retryAddBtn) {
-                                console.log(`      🖱️ Clicking "Add to Prompt" button at [${retryAddBtn.cx}, ${retryAddBtn.cy}]...`);
-                                try { await page.mouse.click(retryAddBtn.cx, retryAddBtn.cy); } catch {}
-                                await page.waitForTimeout(2000);
-                                phase2Success = true;
-                                uploadCompletedInUI = true;
-                                break;
-                            }
-                        } else {
-                            console.log(`      ⏳ Waiting for panel cards to finish processing (poll ${poll}/20)...`);
-                            await page.waitForTimeout(1500);
-                        }
-                    }
-
-                    if (!phase2Success) {
-                        console.warn(`      ⚠️ Could not explicitly click Add to Prompt — proceeding to verify attachment`);
-                        uploadCompletedInUI = true;
+                    if (wait % 5 === 0) {
+                        console.log(`      ⏳ Upload progress (${elapsedSec}s elapsed): items=[${uploadState.itemsText.join(', ')}]`);
                     }
                 }
 
+                if (!uploadDoneInBackground) {
+                    console.warn(`      ⚠️ Upload did not explicitly confirm 100% within 40s, proceeding to Images tab...`);
+                    uploadDoneInBackground = true;
+                }
 
-                if (!uploadCompletedInUI) {
-                    try { if (existsSync(tmpPath)) unlinkSync(tmpPath); } catch {}
-                    throw new Error(`[GoogleFX] ❌ Media upload in UI did not complete or was interrupted.`);
+                // ── PHASE 2: Select uploaded asset in Images tab & click "Add to prompt" ──
+                console.log(`      📂 Phase 2: Selecting uploaded asset in Images tab and adding to prompt bar...`);
+                let phase2Success = false;
+                for (let attempt = 1; attempt <= 5 && !phase2Success; attempt++) {
+                    // 1. Ensure popover/drawer is open
+                    await this._openMediaPanel(page);
+                    await page.waitForTimeout(800);
+
+                    // 2. Switch to Images tab
+                    await this._switchMediaTab(page, 'Images');
+                    await page.waitForTimeout(1000);
+
+                    // 3. Click the uploaded image item
+                    const selectedItem = await page.evaluate((fname) => {
+                        const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+                        const popover = document.querySelector('flow-add-menu-popover-content') || document.body;
+                        const items = Array.from(popover.querySelectorAll('button.asset-item, [role="option"]')).filter(isVisible);
+                        const match = items.find(b => {
+                            const txt = (b.innerText || '').toLowerCase();
+                            return (txt.includes(fname.toLowerCase()) || txt.includes('storyboard') || txt.includes('upload_ref')) && !txt.includes('uploading');
+                        }) || items[0];
+
+                        if (match) {
+                            match.click();
+                            return (match.innerText || '').trim().replace(/\n/g, ' ');
+                        }
+                        return null;
+                    }, targetFilename);
+
+                    if (selectedItem) {
+                        console.log(`      📌 Selected image asset in Images tab: "${selectedItem}"`);
+                        await page.waitForTimeout(1000);
+                    }
+
+                    // 4. Click "Add to prompt" button
+                    const addClicked = await page.evaluate(() => {
+                        const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+                        const btn = Array.from(document.querySelectorAll('button.detail-add-to-prompt-btn, button')).find(b => {
+                            if (!isVisible(b)) return false;
+                            const txt = (b.innerText || '').trim().toLowerCase();
+                            return txt === 'add to prompt' || txt.includes('add to prompt');
+                        });
+                        if (btn) {
+                            btn.click();
+                            return true;
+                        }
+                        return false;
+                    });
+
+                    if (addClicked) {
+                        console.log(`      🖱️ Clicked "Add to prompt" button for uploaded image!`);
+                        await page.waitForTimeout(1500);
+                    }
+
+                    // Close popover
+                    await page.keyboard.press('Escape');
+                    await page.waitForTimeout(1000);
+
+                    // 5. Verify chip in prompt bar
+                    const hasChip = await page.evaluate(() => {
+                        const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+                        const chips = Array.from(document.querySelectorAll('button.chip-container, button[class*="chip-container"]')).filter(isVisible);
+                        return chips.length >= 1;
+                    });
+
+                    if (hasChip) {
+                        console.log(`      ✅ Uploaded storyboard chip confirmed attached in prompt bar!`);
+                        phase2Success = true;
+                        break;
+                    }
+
+                    await page.waitForTimeout(1000);
                 }
 
                 uploaded = true;
@@ -2337,113 +2067,11 @@ export class GoogleFxFlowTool extends BaseTool {
         }
 
         if (!uploaded) {
-            try { if (existsSync(tmpPath)) unlinkSync(tmpPath); } catch {}
+            try { if (tmpPath !== mediaUrl && existsSync(tmpPath)) unlinkSync(tmpPath); } catch {}
             throw new Error(`[GoogleFX] ❌ Media upload failed: file chooser was not triggered or file set failed after 3 attempts.`);
         }
 
-        // ── CRITICAL: Verify attachment actually appeared in prompt bar ──────
-        console.log(`      🔍 Waiting for media attachment to appear in the prompt bar...`);
-        let attachmentVerified = false;
-        const MAX_ATTACH_ROUNDS = 5;
-
-        for (let round = 1; round <= MAX_ATTACH_ROUNDS && !attachmentVerified; round++) {
-            if (round > 1) {
-                const waitSec = round <= 3 ? 1.5 : 2.5;
-                console.log(`      🔄 Round ${round}/${MAX_ATTACH_ROUNDS}: Re-trying "Add to Prompt" click (${waitSec}s wait)...`);
-                await page.waitForTimeout(waitSec * 1000);
-                const retryCoords = await page.evaluate(() => {
-                    const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
-                    const btn = Array.from(document.querySelectorAll('button')).find(b => {
-                        if (!isVisible(b)) return false;
-                        const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
-                        return txt === 'add to prompt' || txt.includes('add to prompt');
-                    });
-                    if (btn) {
-                        const r = btn.getBoundingClientRect();
-                        return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2) };
-                    }
-                    return null;
-                });
-                if (retryCoords) {
-                    await page.mouse.click(retryCoords.cx, retryCoords.cy);
-                    await page.waitForTimeout(1500);
-                } else {
-                    // No "Add to Prompt" button visible — may already be attached
-                    console.log(`      ℹ️ "Add to Prompt" not found in round ${round} — checking if already attached...`);
-                }
-            }
-
-            for (let i = 0; i < 20 && !attachmentVerified; i++) {
-                attachmentVerified = await page.evaluate(() => {
-                    const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
-
-                    // CHECK 1: A video element with blob/http src is visible anywhere (freshly uploaded media thumbnail)
-                    const videos = Array.from(document.querySelectorAll('video'));
-                    for (const v of videos) {
-                        if (!isVisible(v)) continue;
-                        const src = v.getAttribute('src') || (v.querySelector('source') && v.querySelector('source').getAttribute('src')) || '';
-                        if (src.startsWith('blob:') || src.startsWith('http')) return true;
-                    }
-
-                    // CHECK 2: "Add to Prompt" button is GONE — means media was added and panel closed
-                    const addToPromptVisible = Array.from(document.querySelectorAll('button')).some(b => {
-                        if (!isVisible(b)) return false;
-                        const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
-                        return txt === 'add to prompt' || txt.includes('add to prompt');
-                    });
-                    if (!addToPromptVisible) {
-                        // Double-check: session panel (right side) exists with some content — means attachment succeeded
-                        const rightPanelHasContent = Array.from(document.querySelectorAll('img[src]')).some(img => {
-                            if (!isVisible(img)) return false;
-                            const r = img.getBoundingClientRect();
-                            return r.left > window.innerWidth * 0.55;
-                        });
-                        const rightInputVisible = Array.from(document.querySelectorAll('[role="textbox"], [contenteditable="true"], textarea')).some(el => {
-                            if (!isVisible(el)) return false;
-                            const r = el.getBoundingClientRect();
-                            return r.left > window.innerWidth * 0.5;
-                        });
-                        if (rightPanelHasContent || rightInputVisible) return true;
-                    }
-
-                    // CHECK 3: Look for image/thumbnail chips in the bottom-right area (prompt input zone)
-                    const imgs = Array.from(document.querySelectorAll('img[src]')).filter(img => {
-                        if (!isVisible(img)) return false;
-                        const src = img.getAttribute('src') || '';
-                        if (src.startsWith('data:') || src === '') return false;
-                        if (src.includes('googleusercontent') || src.includes('lh3.google') || src.includes('gstatic')) return false;
-                        const r = img.getBoundingClientRect();
-                        return r.left > window.innerWidth * 0.5 && r.top > window.innerHeight * 0.4;
-                    });
-                    if (imgs.length > 0) return true;
-
-                    // CHECK 4: Submit/Create button is enabled AND "Add to Prompt" is gone → infer attachment succeeded
-                    const submitBtn = Array.from(document.querySelectorAll('button')).find(b => {
-                        if (!isVisible(b)) return false;
-                        const txt = (b.innerText || b.textContent || '').trim();
-                        return txt.includes('Create') || txt.includes('arrow_forward') || txt === '→';
-                    });
-                    if (submitBtn && !submitBtn.disabled && submitBtn.getAttribute('aria-disabled') !== 'true' && !addToPromptVisible) {
-                        return true;
-                    }
-
-                    return false;
-                });
-
-                if (!attachmentVerified) await page.waitForTimeout(600);
-            }
-
-            if (attachmentVerified) {
-                console.log(`      ✅ Media attachment confirmed in prompt bar (round ${round}/${MAX_ATTACH_ROUNDS})!`);
-                break;
-            }
-            console.log(`      ⏳ Attachment not yet visible after round ${round}/${MAX_ATTACH_ROUNDS}...`);
-        }
-
-        if (!attachmentVerified) {
-            try { if (existsSync(tmpPath)) unlinkSync(tmpPath); } catch {}
-            throw new Error(`[GoogleFX] ❌ Failed to verify media attachment in prompt bar after ${MAX_ATTACH_ROUNDS} rounds. Aborting prompt submission.`);
-        }
+        console.log(`      ✅ Storyboard attachment step completed.`);
 
 
         // ── Final wait: ensure panel is fully closed and prompt bar is stable ──
@@ -2481,7 +2109,7 @@ export class GoogleFxFlowTool extends BaseTool {
         this._lastUploadedMediaUrls = capturedUploadUrls;
 
         try {
-            if (existsSync(tmpPath)) {
+            if (tmpPath !== mediaUrl && existsSync(tmpPath)) {
                 unlinkSync(tmpPath);
                 console.log(`      🗑️ Temp upload file deleted: ${tmpPath}`);
             }
@@ -2513,242 +2141,84 @@ export class GoogleFxFlowTool extends BaseTool {
         const targetAvatar = (avatarName && String(avatarName).trim()) || 'me';
         console.log(`\n[Avatar] 👤 Adding Avatar "${targetAvatar}" to prompt (REQUIRED)...`);
 
-        // Check if avatar is ALREADY attached in prompt bar
-        // STRICT check: require an actual <img> element inside the prompt container (not just any chip)
-        const isAlreadyAttached = await page.evaluate(() => {
-            const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
-            const promptArea = Array.from(document.querySelectorAll('[role="textbox"], [contenteditable="true"], textarea'))
-                .find(el => isVisible(el) && el.getBoundingClientRect().left > window.innerWidth * 0.4);
-            if (!promptArea) return false;
-            let container = promptArea.parentElement;
-            for (let i = 0; i < 8 && container; i++) {
-                // Only count real <img> elements (avatar thumbnail) — not just any chip/button
-                const imgs = container.querySelectorAll('img');
-                const hasRealImg = Array.from(imgs).some(img => isVisible(img) && img.width > 16 && img.height > 16);
-                if (hasRealImg) return true;
-                container = container.parentElement;
-            }
-            return false;
-        });
+        let attached = false;
+        for (let attempt = 1; attempt <= 5; attempt++) {
+            // Step 1: Open the Media Drawer
+            await this._openMediaPanel(page);
+            await page.waitForTimeout(800);
 
-        if (isAlreadyAttached) {
-            console.log(`      ✅ Avatar is already attached to prompt bar (verified img chip present)!`);
-            return;
-        }
+            // Step 2: Switch strictly to "Avatars" tab in the popover
+            await this._switchMediaTab(page, 'Avatars');
+            await page.waitForTimeout(1000);
 
-        // Step 1: Open the Media Drawer
-        const panelOpened = await this._openMediaPanel(page);
-        if (!panelOpened) {
-            throw new Error('[GoogleFX] ❌ Could not open media drawer for Avatar selection.');
-        }
-        await page.waitForTimeout(1000);
-
-        // Step 2: Ensure "Avatar" tab is selected in the sidebar
-        console.log(`      📂 Switching to "Avatar" tab in sidebar...`);
-        let avatarTabFound = false;
-
-        for (let tabAttempt = 1; tabAttempt <= 6; tabAttempt++) {
-            const tabCoords = await page.evaluate(() => {
+            // Step 3: Ensure Avatar "Me" is selected and "Add to prompt" is clicked
+            const addClicked = await page.evaluate((targetName) => {
                 const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
-                const candidates = Array.from(document.querySelectorAll('button, [role="tab"], [role="option"], [role="listitem"], li, div, span'));
+                const popover = document.querySelector('flow-add-menu-popover-content') || document.body;
 
-                // Search for tab with exact or close match for "Avatar" or "Avatars"
-                const tab = candidates.find(el => {
-                    if (!isVisible(el)) return false;
-                    const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
-                    const isAvatarTab = txt === 'avatar' || txt === 'avatars' ||
-                        txt.startsWith('avatar\n') || txt.endsWith('\navatar') ||
-                        txt.includes('person\navatar') || txt.includes('account_circle\navatar');
-                    if (!isAvatarTab && txt !== 'avatar') return false;
-
-                    const r = el.getBoundingClientRect();
-                    return r.width > 20 && r.height > 15 && r.width < 400 && r.height < 100;
-                });
-
-                if (tab) {
-                    const isSelected = tab.getAttribute('aria-selected') === 'true' ||
-                        tab.getAttribute('data-selected') === 'true' ||
-                        (tab.className || '').includes('active') ||
-                        (tab.className || '').includes('selected');
-                    const r = tab.getBoundingClientRect();
-                    return {
-                        cx: Math.round(r.left + r.width / 2),
-                        cy: Math.round(r.top + r.height / 2),
-                        isSelected,
-                    };
-                }
-                return null;
-            });
-
-            if (tabCoords) {
-                if (tabCoords.isSelected) {
-                    console.log(`      ✅ "Avatar" tab is already active`);
-                    avatarTabFound = true;
-                    break;
-                }
-                console.log(`      🖱️ Clicking "Avatar" tab at [${tabCoords.cx}, ${tabCoords.cy}] (attempt ${tabAttempt}/6)...`);
-                try {
-                    await page.mouse.click(tabCoords.cx, tabCoords.cy);
-                } catch {
-                    await page.evaluate((c) => {
-                        const el = document.elementFromPoint(c.cx, c.cy);
-                        if (el) el.click();
-                    }, tabCoords);
-                }
-                await page.waitForTimeout(1200);
-                avatarTabFound = true;
-                break;
-            }
-
-            console.warn(`      ⚠️ "Avatar" tab not located yet (attempt ${tabAttempt}/6)...`);
-            await page.waitForTimeout(700);
-        }
-
-        // Step 3: Ensure Avatar card is selected and "Add to Prompt" is clicked
-        console.log(`      📌 Ensuring avatar card "${targetAvatar}" is selected...`);
-        let addToPromptClicked = false;
-
-        for (let selectAttempt = 1; selectAttempt <= 8; selectAttempt++) {
-            // Check if "Add to Prompt" is already showing
-            const addBtn = await page.evaluate(() => {
-                const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
-                const btn = Array.from(document.querySelectorAll('button')).find(b => {
+                // Check if "Add to prompt" is ALREADY visible (Me is preselected)
+                let btn = Array.from(document.querySelectorAll('button.detail-add-to-prompt-btn, button')).find(b => {
                     if (!isVisible(b)) return false;
-                    const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
+                    const txt = (b.innerText || '').trim().toLowerCase();
                     return txt === 'add to prompt' || txt.includes('add to prompt');
                 });
+
                 if (btn) {
-                    const r = btn.getBoundingClientRect();
-                    return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2) };
-                }
-                return null;
-            });
-
-            if (addBtn) {
-                console.log(`      ✅ "Add to Prompt" button found at [${addBtn.cx}, ${addBtn.cy}]! Clicking...`);
-                try {
-                    await page.mouse.click(addBtn.cx, addBtn.cy);
-                } catch {
-                    await page.evaluate((c) => {
-                        const el = document.elementFromPoint(c.cx, c.cy);
-                        if (el) el.click();
-                    }, addBtn);
-                }
-                addToPromptClicked = true;
-                await page.waitForTimeout(1500);
-                break;
-            }
-
-            // "Add to Prompt" not yet visible -> locate and click the avatar card
-            console.log(`      🔍 Searching for avatar card to select (attempt ${selectAttempt}/8)...`);
-            const cardCoords = await page.evaluate((targetName) => {
-                const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
-                const candidates = Array.from(document.querySelectorAll('[role="option"], [role="listitem"], [data-card], [class*="card"], [class*="asset"], [role="button"]'));
-
-                // 1. First search for card with text matching targetName (e.g. 'me')
-                let card = candidates.find(el => {
-                    if (!isVisible(el)) return false;
-                    const r = el.getBoundingClientRect();
-                    if (r.width < 35 || r.height < 35) return false;
-                    const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
-                    if (txt === 'avatar' || txt === 'uploads' || txt === 'all' || txt === 'images') return false;
-                    return txt.includes(targetName.toLowerCase());
-                });
-
-                // 2. Fallback: First visible card with role="option" or image inside media panel
-                if (!card) {
-                    card = candidates.find(el => {
-                        if (!isVisible(el)) return false;
-                        const r = el.getBoundingClientRect();
-                        if (r.width < 35 || r.height < 35) return false;
-                        const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
-                        if (['avatar', 'uploads', 'images', 'videos', 'voices', 'characters', 'all'].includes(txt)) return false;
-                        return el.getAttribute('role') === 'option' || !!el.querySelector('img');
-                    });
+                    btn.click();
+                    return 'clicked_direct';
                 }
 
-                // 3. Fallback: any [role="option"]
-                if (!card) {
-                    card = Array.from(document.querySelectorAll('[role="option"]')).find(el => isVisible(el));
-                }
+                // If not showing, click the Me card
+                const items = Array.from(popover.querySelectorAll('button.asset-item, [role="option"]')).filter(isVisible);
+                const me = items.find(it => {
+                    const txt = (it.innerText || '').toLowerCase();
+                    return !txt.includes('rename') && (txt.includes('me') || txt.includes('avatar'));
+                }) || items[0];
 
-                if (card) {
-                    const r = card.getBoundingClientRect();
-                    return {
-                        cx: Math.round(r.left + r.width / 2),
-                        cy: Math.round(r.top + r.height / 2),
-                        text: (card.innerText || card.textContent || '').trim().substring(0, 30),
-                    };
+                if (me) {
+                    me.click();
+                    return 'clicked_item';
                 }
-                return null;
+                return 'not_found';
             }, targetAvatar);
 
-            if (cardCoords) {
-                console.log(`      🖱️ Clicking avatar card "${cardCoords.text}" at [${cardCoords.cx}, ${cardCoords.cy}]...`);
-                try {
-                    await page.mouse.click(cardCoords.cx, cardCoords.cy);
-                } catch {
-                    await page.evaluate((c) => {
-                        const el = document.elementFromPoint(c.cx, c.cy);
-                        if (el) el.click();
-                    }, cardCoords);
-                }
-                await page.waitForTimeout(1200);
-            } else {
-                console.warn(`      ⚠️ Avatar card not located yet (attempt ${selectAttempt}/8)...`);
-                await page.waitForTimeout(800);
+            console.log(`      📌 Avatar action: "${addClicked}"`);
+            await page.waitForTimeout(1000);
+
+            if (addClicked === 'clicked_item') {
+                await page.evaluate(() => {
+                    const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+                    const btn = Array.from(document.querySelectorAll('button.detail-add-to-prompt-btn, button')).find(b => {
+                        if (!isVisible(b)) return false;
+                        const txt = (b.innerText || '').trim().toLowerCase();
+                        return txt === 'add to prompt' || txt.includes('add to prompt');
+                    });
+                    if (btn) btn.click();
+                });
+                await page.waitForTimeout(1500);
             }
-        }
 
-        if (!addToPromptClicked) {
-            throw new Error(`[GoogleFX] ❌ Could not click "Add to Prompt" for Avatar "${targetAvatar}". Avatar selection is REQUIRED.`);
-        }
+            // Close popover
+            await page.keyboard.press('Escape');
+            await page.waitForTimeout(1000);
 
-        // Step 4: Verify avatar attachment in prompt bar
-        console.log(`      🔍 Verifying avatar attachment in prompt bar...`);
-        let attached = false;
-        for (let verifyAttempt = 1; verifyAttempt <= 10; verifyAttempt++) {
+            // Step 5: Verify prompt bar chips (Must have >= 2 chips: Storyboard + Avatar)
             attached = await page.evaluate(() => {
                 const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
-                // Check 1: Image chips inside prompt input container
-                const promptArea = Array.from(document.querySelectorAll('[role="textbox"], [contenteditable="true"], textarea'))
-                    .find(el => isVisible(el) && el.getBoundingClientRect().left > window.innerWidth * 0.4);
-                if (promptArea) {
-                    let container = promptArea.parentElement;
-                    for (let i = 0; i < 8 && container; i++) {
-                        const imgs = container.querySelectorAll('img');
-                        if (imgs.length > 0) return true;
-                        const chips = container.querySelectorAll('[role="button"], [class*="chip"], [class*="attachment"]');
-                        if (chips.length > 0) return true;
-                        container = container.parentElement;
-                    }
-                }
-                // Check 2: Any image element in the right bottom prompt area
-                const promptImgs = Array.from(document.querySelectorAll('img')).filter(img => {
-                    if (!isVisible(img)) return false;
-                    const r = img.getBoundingClientRect();
-                    return r.left > window.innerWidth * 0.5 && r.top > window.innerHeight * 0.4;
-                });
-                if (promptImgs.length > 0) return true;
-
-                // Check 3: "Add to Prompt" is gone and prompt textarea is visible
-                const addBtnVisible = Array.from(document.querySelectorAll('button')).some(b => {
-                    if (!isVisible(b)) return false;
-                    const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
-                    return txt.includes('add to prompt');
-                });
-                return !addBtnVisible;
+                const chips = Array.from(document.querySelectorAll('button.chip-container, button[class*="chip-container"]')).filter(isVisible);
+                return chips.length >= 2;
             });
 
             if (attached) {
-                console.log(`      ✨ Avatar "${targetAvatar}" successfully attached to prompt bar!`);
+                console.log(`      ✨ SUCCESS: Both Storyboard and Avatar ("${targetAvatar}") confirmed attached to prompt bar (chips count >= 2)!`);
                 break;
             }
-            await page.waitForTimeout(600);
+            console.warn(`      ⚠️ Both chips not confirmed yet (attempt ${attempt}/5)...`);
+            await page.waitForTimeout(1500);
         }
 
         if (!attached) {
-            throw new Error(`[GoogleFX] ❌ Could not verify Avatar "${targetAvatar}" attachment in prompt bar. Avatar is REQUIRED.`);
+            throw new Error(`[GoogleFX] ❌ Could not verify BOTH Storyboard and Avatar "${targetAvatar}" in prompt bar (chips count < 2).`);
         }
 
         await page.waitForTimeout(1000);
@@ -2776,110 +2246,115 @@ export class GoogleFxFlowTool extends BaseTool {
     async _submitPrompt(page, prompt) {
         console.log(`      ⌨️ Submitting prompt into input bar (${prompt.length} chars)...`);
 
-        // 1. Find and click the text editor element cleanly
-        const editorLocator = page.locator('[role="textbox"], [data-slate-editor="true"], textarea, div[contenteditable="true"]').last();
-        try {
-            if (await editorLocator.isVisible({ timeout: 3000 }).catch(() => false)) {
-                await editorLocator.click();
-            } else {
-                await page.evaluate(() => {
-                    const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
-                    const ed = Array.from(document.querySelectorAll('[role="textbox"], [data-slate-editor="true"], textarea, div[contenteditable="true"]'))
-                        .find(el => isVisible(el));
-                    if (ed) ed.focus();
-                });
+        // 1. Find and click the text editor element cleanly in the right panel prompt bar
+        await page.evaluate(() => {
+            const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+            const editors = Array.from(document.querySelectorAll('[role="textbox"], [data-slate-editor="true"], textarea, div[contenteditable="true"]'))
+                .filter(el => isVisible(el) && el.getBoundingClientRect().left > window.innerWidth * 0.5 && el.getBoundingClientRect().top > window.innerHeight * 0.5);
+            const ed = editors[editors.length - 1] || editors[0];
+            if (ed) {
+                ed.focus();
+                ed.click();
             }
-        } catch (e) {}
+        });
+        await page.waitForTimeout(400);
 
-        await page.waitForTimeout(300);
-
-        // 2. Select All and Backspace to clear existing text safely via keyboard
-        const isMac = process.platform === 'darwin';
-        const modifier = isMac ? 'Meta' : 'Control';
+        // 2. Safely position cursor at the end without selecting or deleting attached chips
         try {
-            await page.keyboard.press(`${modifier}+A`);
-            await page.keyboard.press('Backspace');
+            await page.keyboard.press('ArrowDown');
+            await page.keyboard.press('ArrowDown');
         } catch (e) {}
         await page.waitForTimeout(200);
 
         // 3. Type prompt using Playwright CDP trusted input (no execCommand, no innerHTML mutation)
-        // CDP keyboard.insertText updates Slate.js / React editor state 100% cleanly without DOM corruption
         await page.keyboard.insertText(prompt);
         await page.waitForTimeout(500);
 
         // Final verification check of typed length
         const currentPromptLength = await page.evaluate(() => {
-            const active = document.activeElement;
             const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
-            const ed = active && isVisible(active) ? active : Array.from(document.querySelectorAll('[role="textbox"], [data-slate-editor="true"], textarea, div[contenteditable="true"]')).find(el => isVisible(el));
+            const editors = Array.from(document.querySelectorAll('[role="textbox"], [data-slate-editor="true"], textarea, div[contenteditable="true"]'))
+                .filter(el => isVisible(el) && el.getBoundingClientRect().left > window.innerWidth * 0.5 && el.getBoundingClientRect().top > window.innerHeight * 0.5);
+            const ed = editors[editors.length - 1] || editors[0];
             return ed ? (ed.innerText || ed.value || ed.textContent || '').trim().length : 0;
         });
 
         console.log(`      ✅ Prompt typed successfully into input bar (${currentPromptLength} / ${prompt.length} chars)`);
 
-        // 4. Click Send (arrow_forward) button or press Enter
+        // 4. Click Send button (Start generation / arrow_forward) in bottom prompt bar
         const sendCoords = await page.evaluate(() => {
             const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
-            const allBtns = Array.from(document.querySelectorAll('button'));
-            const allTexts = b => Array.from(b.querySelectorAll('*'))
-                .map(c => (c.textContent || '').trim())
-                .concat([(b.textContent || '').trim()]);
-
-            const isClearBtn = b => allTexts(b).some(t => t === 'close' || t === 'cancel' || t === 'clear');
-
-            let sendBtn = allBtns.find(b => {
+            const allBtns = Array.from(document.querySelectorAll('button')).filter(b => {
                 if (!isVisible(b)) return false;
-                if (isClearBtn(b)) return false;
                 const r = b.getBoundingClientRect();
-                if (r.left < window.innerWidth * 0.4) return false;
-                if (r.top < window.innerHeight * 0.6) return false;
-                return allTexts(b).some(t => t === 'arrow_forward');
+                return r.left > window.innerWidth * 0.5 && r.top > window.innerHeight * 0.65;
             });
 
+            // PRIORITY 1: button[aria-label="Start generation"] in bottom prompt bar (new Google Flow UI)
+            let sendBtn = allBtns.find(b => {
+                const aria = (b.getAttribute('aria-label') || '').toLowerCase().trim();
+                return aria === 'start generation' || aria === 'send' || aria === 'generate';
+            });
+
+            // PRIORITY 2: button containing arrow_forward icon in bottom-right prompt bar (y > 65%)
             if (!sendBtn) {
                 sendBtn = allBtns.find(b => {
-                    if (!isVisible(b)) return false;
-                    if (isClearBtn(b)) return false;
-                    return allTexts(b).some(t => t === 'arrow_forward');
+                    const txt = (b.innerText || b.textContent || '').trim();
+                    const hasIcon = Array.from(b.querySelectorAll('mat-icon, i, span')).some(el => (el.textContent || '').trim() === 'arrow_forward');
+                    return txt === 'arrow_forward' || hasIcon;
                 });
             }
 
             if (sendBtn) {
                 if (window.__highlight) window.__highlight(sendBtn);
                 const r = sendBtn.getBoundingClientRect();
-                return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2) };
+                return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2), label: sendBtn.getAttribute('aria-label') || 'arrow_forward' };
             }
             return null;
         });
 
         const _sendFired = async () => page.evaluate(() => {
             const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
-            const btns = Array.from(document.querySelectorAll('button')).filter(b => isVisible(b) && b.getBoundingClientRect().left > window.innerWidth * 0.5);
-            const hasStop = btns.some(b => (b.innerText || '').trim().toLowerCase() === 'stop');
-            const hasSend = btns.some(b => (b.innerText || '').trim() === 'arrow_forward');
-            return hasStop || !hasSend;
+            const btns = Array.from(document.querySelectorAll('button')).filter(isVisible);
+            const hasStop = btns.some(b => {
+                const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
+                const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+                return txt === 'stop' || aria.includes('stop') || txt === 'cancel';
+            });
+            const hasSpinner = Array.from(document.querySelectorAll('mat-spinner, [class*="spinner"], mat-progress-bar')).some(isVisible);
+            return hasStop || hasSpinner;
         });
 
         if (sendCoords && sendCoords.cx > 0 && sendCoords.cy > 0) {
-            console.log(`      📤 Clicked Send/Create button at [${sendCoords.cx}, ${sendCoords.cy}]`);
+            console.log(`      📤 Clicked Send/Create button at [${sendCoords.cx}, ${sendCoords.cy}] (${sendCoords.label})`);
             try { await page.mouse.click(sendCoords.cx, sendCoords.cy); } catch {}
         } else {
-            console.log(`      📤 Triggering submission via Enter key...`);
-            await page.keyboard.press('Enter');
+            console.log(`      📤 Triggering submission via Cmd+Enter / Enter key...`);
+            await page.keyboard.press('Meta+Enter');
+            await page.keyboard.press('Control+Enter');
         }
 
         await page.waitForTimeout(2000);
         for (let r = 1; r <= 3 && !(await _sendFired()); r++) {
-            console.warn(`      ⚠️ Send not registered — retrying (${r}/3)...`);
+            console.warn(`      ⚠️ Send not registered — retrying click on Start generation button (${r}/3)...`);
             const c = await page.evaluate(() => {
-                const b = Array.from(document.querySelectorAll('button')).find(b => b.offsetWidth > 0 && (b.innerText || '').trim() === 'arrow_forward' && b.getBoundingClientRect().left > window.innerWidth * 0.5);
+                const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+                const b = Array.from(document.querySelectorAll('button')).find(b => {
+                    if (!isVisible(b)) return false;
+                    const aria = (b.getAttribute('aria-label') || '').toLowerCase().trim();
+                    const txt = (b.innerText || b.textContent || '').trim();
+                    return aria === 'start generation' || txt === 'arrow_forward';
+                });
                 if (!b) return null;
                 const rc = b.getBoundingClientRect();
                 return { cx: Math.round(rc.left + rc.width / 2), cy: Math.round(rc.top + rc.height / 2) };
             });
-            if (c) { try { await page.mouse.click(c.cx, c.cy); } catch {} }
-            else { await page.keyboard.press('Enter'); }
-            await page.waitForTimeout(2000);
+            if (c) {
+                try { await page.mouse.click(c.cx, c.cy); } catch {}
+            } else {
+                await page.keyboard.press('Meta+Enter');
+            }
+            await page.waitForTimeout(1500);
         }
         await page.waitForTimeout(1000);
 
@@ -2968,6 +2443,27 @@ export class GoogleFxFlowTool extends BaseTool {
         return false;
     }
 
+    async _captureLastFrameFromGeneratedVideo(page, itemId = null) {
+        console.log(`\n[Frame Capture] 📸 Resolving last frame of generated video...`);
+        const frame = lastExtractedFrameUrl || lastExtractedFramePath;
+        if (frame) {
+            console.log(`      ✅ Last frame already extracted via FFmpeg: ${frame}`);
+            return frame;
+        }
+        return true;
+    }
+
+    async _addLastFrameFromUploadsToPrompt(page, previousSceneLastFrameUrl = null, itemId = null) {
+        console.log(`\n[Scene Media] 🖼️ Attaching last scene frame to prompt...`);
+        const frameToUpload = previousSceneLastFrameUrl || lastExtractedFramePath || lastExtractedFrameUrl;
+        if (frameToUpload) {
+            console.log(`      ⬆️ Uploading previous scene last frame to Flow: ${frameToUpload}`);
+            return await this._uploadMediaFromUrl(page, frameToUpload, itemId);
+        }
+        console.warn(`      ⚠️ No previous scene last frame URL/path available!`);
+        return false;
+    }
+
 
     async _extractResult(page, type, itemId, preExistingUrls = []) {
         const isVideoType = type === 'video' || type === 'avatar_video';
@@ -3043,10 +2539,12 @@ export class GoogleFxFlowTool extends BaseTool {
                 const isGeneratingText = bodyText.includes('Generating') || bodyText.includes('generating') ||
                                          bodyText.includes('Creating') || bodyText.includes('creating') ||
                                          bodyText.includes('Rendering') || bodyText.includes('processing') ||
-                                         bodyText.includes('Thinking') || bodyText.includes('Analyzing');
+                                         (bodyText.includes('Thinking...') || bodyText.includes('Thinking…')) ||
+                                         bodyText.includes('Analyzing');
 
                 let statusText = '';
-                const statusMatch = bodyText.match(/(Generating[^\.\n]*|Creating[^\.\n]*|Rendering[^\.\n]*|Thinking[^\.\n]*|Analyzing[^\.\n]*|Processing[^\.\n]*)/i);
+                const cleanBodyForStatus = bodyText.replace(/Thinking level/gi, '');
+                const statusMatch = cleanBodyForStatus.match(/(Generating[^\.\n]*|Creating[^\.\n]*|Rendering[^\.\n]*|Thinking[^\.\n]*|Analyzing[^\.\n]*|Processing[^\.\n]*)/i);
                 if (statusMatch) {
                     statusText = statusMatch[1].trim();
                 }
@@ -3439,15 +2937,34 @@ export class GoogleFxFlowTool extends BaseTool {
                 try {
                     const tileBox = await page.evaluate(({ excludedUrls }) => {
                         const excluded = new Set(excludedUrls || []);
-                        const tiles = Array.from(document.querySelectorAll('flow-video-tile, [class*="video-tile"], [aria-label="Open video in editor"]'))
-                            .filter(t => t.offsetWidth > 0 && t.offsetHeight > 0);
-                        // Prioritize new video tile whose thumbnail is NOT an excluded uploaded media URL
-                        const targetTile = tiles.find(t => {
+                        const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+                        const canvasTiles = Array.from(document.querySelectorAll('flow-video-tile, flow-grid-tile-container, flow-tile-container, [class*="video-tile"]'))
+                            .filter(t => {
+                                if (!isVisible(t)) return false;
+                                const r = t.getBoundingClientRect();
+                                return r.left >= 100 && r.left < window.innerWidth * 0.7 && r.top >= 70 && r.width >= 80 && r.height >= 80;
+                            });
+
+                        let targetTile = canvasTiles.find(t => {
                             const img = t.querySelector('img[src]');
                             if (!img) return false;
                             const src = img.getAttribute('src') || '';
                             return src && !excluded.has(src) && !src.includes('googleusercontent.com') && !src.includes('gstatic');
-                        }) || tiles[tiles.length - 1] || null;
+                        });
+
+                        if (!targetTile && canvasTiles.length > 0) {
+                            targetTile = canvasTiles[canvasTiles.length - 1];
+                        }
+
+                        if (!targetTile) {
+                            const allTiles = Array.from(document.querySelectorAll('flow-video-tile, [class*="video-tile"], [aria-label="Open video in editor"]')).filter(isVisible);
+                            targetTile = allTiles.find(t => {
+                                const img = t.querySelector('img[src]');
+                                if (!img) return false;
+                                const src = img.getAttribute('src') || '';
+                                return src && !excluded.has(src) && !src.includes('googleusercontent.com') && !src.includes('gstatic');
+                            }) || allTiles[allTiles.length - 1] || null;
+                        }
 
                         if (!targetTile) return null;
                         const r = targetTile.getBoundingClientRect();
@@ -3551,17 +3068,37 @@ export class GoogleFxFlowTool extends BaseTool {
                         // Ensure mouse is hovering over the target video tile so the top-right icons appear
                         const tileCoords = await page.evaluate(({ excludedUrls }) => {
                             const excluded = new Set(excludedUrls || []);
-                            const tiles = Array.from(document.querySelectorAll('flow-video-tile, [class*="video-tile"], [aria-label="Open video in editor"]'))
-                                .filter(t => t.offsetWidth > 0 && t.offsetHeight > 0);
-                            const tile = tiles.find(t => {
+                            const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+                            const canvasTiles = Array.from(document.querySelectorAll('flow-video-tile, flow-grid-tile-container, flow-tile-container, [class*="video-tile"]'))
+                                .filter(t => {
+                                    if (!isVisible(t)) return false;
+                                    const r = t.getBoundingClientRect();
+                                    return r.left >= 100 && r.left < window.innerWidth * 0.7 && r.top >= 70 && r.width >= 80 && r.height >= 80;
+                                });
+
+                            let targetTile = canvasTiles.find(t => {
                                 const img = t.querySelector('img[src]');
                                 if (!img) return false;
                                 const src = img.getAttribute('src') || '';
                                 return src && !excluded.has(src) && !src.includes('googleusercontent.com') && !src.includes('gstatic');
-                            }) || tiles[tiles.length - 1] || null;
+                            });
 
-                            if (!tile) return null;
-                            const r = tile.getBoundingClientRect();
+                            if (!targetTile && canvasTiles.length > 0) {
+                                targetTile = canvasTiles[canvasTiles.length - 1];
+                            }
+
+                            if (!targetTile) {
+                                const allTiles = Array.from(document.querySelectorAll('flow-video-tile, [class*="video-tile"], [aria-label="Open video in editor"]')).filter(isVisible);
+                                targetTile = allTiles.find(t => {
+                                    const img = t.querySelector('img[src]');
+                                    if (!img) return false;
+                                    const src = img.getAttribute('src') || '';
+                                    return src && !excluded.has(src) && !src.includes('googleusercontent.com') && !src.includes('gstatic');
+                                }) || allTiles[allTiles.length - 1] || null;
+                            }
+
+                            if (!targetTile) return null;
+                            const r = targetTile.getBoundingClientRect();
                             return {
                                 cx: r.left + r.width / 2,
                                 cy: r.top + r.height / 2,
@@ -3580,17 +3117,24 @@ export class GoogleFxFlowTool extends BaseTool {
                         // Find the 3-dot button strictly in the top-right area of the video tile (no loose fallback to image tiles)
                         const menuBtnClicked = await page.evaluate(({ excludedUrls }) => {
                             const excluded = new Set(excludedUrls || []);
+                            const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
                             const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
-                            const tiles = Array.from(document.querySelectorAll('flow-video-tile, [class*="video-tile"], [aria-label="Open video in editor"]'))
-                                .filter(t => t.offsetWidth > 0 && t.offsetHeight > 0);
-                            const tile = tiles.find(t => {
+                            const canvasTiles = Array.from(document.querySelectorAll('flow-video-tile, flow-grid-tile-container, flow-tile-container, [class*="video-tile"]'))
+                                .filter(t => {
+                                    if (!isVisible(t)) return false;
+                                    const r = t.getBoundingClientRect();
+                                    return r.left >= 100 && r.left < window.innerWidth * 0.7 && r.top >= 70 && r.width >= 80 && r.height >= 80;
+                                });
+
+                            let targetTile = canvasTiles.find(t => {
                                 const img = t.querySelector('img[src]');
                                 if (!img) return false;
                                 const src = img.getAttribute('src') || '';
                                 return src && !excluded.has(src) && !src.includes('googleusercontent.com') && !src.includes('gstatic');
-                            }) || tiles[0] || null;
+                            });
+                            if (!targetTile && canvasTiles.length > 0) targetTile = canvasTiles[canvasTiles.length - 1];
 
-                            const tBox = tile ? tile.getBoundingClientRect() : null;
+                            const tBox = targetTile ? targetTile.getBoundingClientRect() : null;
                             if (!tBox) return false;
 
                             const btn = buttons.find(b => {
@@ -3709,15 +3253,26 @@ export class GoogleFxFlowTool extends BaseTool {
                         console.log(`      🎬 Layer 3: Clicking play icon / video tile to open player & download...`);
                         const tileClicked = await page.evaluate(({ excludedUrls }) => {
                             const excluded = new Set(excludedUrls || []);
+                            const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
                             const btns = Array.from(document.querySelectorAll('button, [role="button"]'));
-                            const tiles = Array.from(document.querySelectorAll('flow-video-tile, [class*="video-tile"], [aria-label="Open video in editor"]'))
-                                .filter(t => t.offsetWidth > 0 && t.offsetHeight > 0);
-                            const tile = tiles.find(t => {
+                            const canvasTiles = Array.from(document.querySelectorAll('flow-video-tile, flow-grid-tile-container, flow-tile-container, [class*="video-tile"]'))
+                                .filter(t => {
+                                    if (!isVisible(t)) return false;
+                                    const r = t.getBoundingClientRect();
+                                    return r.left >= 100 && r.left < window.innerWidth * 0.7 && r.top >= 70 && r.width >= 80 && r.height >= 80;
+                                });
+
+                            let tile = canvasTiles.find(t => {
                                 const img = t.querySelector('img[src]');
                                 if (!img) return false;
                                 const src = img.getAttribute('src') || '';
                                 return src && !excluded.has(src) && !src.includes('googleusercontent.com') && !src.includes('gstatic');
-                            }) || tiles[0] || null;
+                            });
+                            if (!tile && canvasTiles.length > 0) tile = canvasTiles[canvasTiles.length - 1];
+                            if (!tile) {
+                                const allTiles = Array.from(document.querySelectorAll('flow-video-tile, [class*="video-tile"], [aria-label="Open video in editor"]')).filter(isVisible);
+                                tile = allTiles[allTiles.length - 1] || null;
+                            }
 
                             if (!tile) return false;
                             const tBox = tile.getBoundingClientRect();
@@ -3997,7 +3552,44 @@ export class GoogleFxFlowTool extends BaseTool {
                 }
             }
 
-            // Step 4: Upload downloaded asset to Cloudflare R2 under ai-content/${itemId}/${filename} & cleanup local file
+            // Step 4: For video generation, extract the exact last frame via FFmpeg and preserve local video copy for multi-scene concat
+            if (downloaded && resultData && resultData.downloadPath && isVideoType && existsSync(resultData.downloadPath)) {
+                try {
+                    // 1. Preserve local copy of MP4 on disk for concatenation/merging
+                    const localVideoFilename = `${itemId || 'flow_video'}_local.mp4`;
+                    const persistentVideoPath = path.join(downloadDir, localVideoFilename);
+                    try {
+                        copyFileSync(resultData.downloadPath, persistentVideoPath);
+                        resultData.localVideoPath = persistentVideoPath;
+                        console.log(`      💾 [Local MP4] Preserved local video copy: ${persistentVideoPath}`);
+                    } catch (copyErr) {
+                        resultData.localVideoPath = resultData.downloadPath;
+                    }
+
+                    // 2. Extract last frame from video using FFmpeg
+                    const lastFrameFilename = `${itemId || 'flow'}_last_frame_${Date.now()}.png`;
+                    const lastFrameLocalPath = path.join(downloadDir, lastFrameFilename);
+                    execSync(`ffmpeg -y -sseof -0.5 -i "${resultData.downloadPath}" -frames:v 1 -q:v 2 "${lastFrameLocalPath}"`, { stdio: 'pipe' });
+                    console.log(`      📸 [FFmpeg] Extracted last frame: ${lastFrameLocalPath}`);
+                    resultData.lastFramePath = lastFrameLocalPath;
+
+                    // 3. Upload last frame to R2
+                    const frameKey = `ai-content/${itemId || 'gen_unknown'}/${lastFrameFilename}`;
+                    const r2FrameResult = await uploadToR2(lastFrameLocalPath, frameKey, 'image/png');
+                    if (r2FrameResult && r2FrameResult.r2Url) {
+                        resultData.lastFrameUrl = r2FrameResult.r2Url;
+                        console.log(`      ☁️ ✅ Last frame uploaded to R2: ${resultData.lastFrameUrl}`);
+                    } else {
+                        resultData.lastFrameUrl = lastFrameLocalPath;
+                    }
+                    lastExtractedFramePath = lastFrameLocalPath;
+                    lastExtractedFrameUrl = resultData.lastFrameUrl;
+                } catch (ffmpegErr) {
+                    console.warn(`      ⚠️ FFmpeg last frame extraction / local video save warning: ${ffmpegErr.message}`);
+                }
+            }
+
+            // Step 5: Upload downloaded asset to Cloudflare R2 under ai-content/${itemId}/${filename} & cleanup local file
             if (downloaded && resultData && resultData.downloadPath) {
                 try {
                     const filename = resultData.filename || `flow_${type}_${Date.now()}.${isVideoType ? 'mp4' : 'png'}`;

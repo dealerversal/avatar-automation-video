@@ -36,6 +36,10 @@ class GenerationQueue {
         const effectiveAvatarName = (avatarName && String(avatarName).trim()) || 'me';
         const mediaUrl = currentJobData.mediaUrl || currentJobData.imageUrl || null;
         const proxy = currentJobData.proxy || null; // Webshare proxy config (may be null = direct)
+        const sceneNumber = currentJobData.sceneNumber || 1;
+        const totalScenes = currentJobData.totalScenes || 1;
+        const previousSceneLastFrameUrl = currentJobData.previousSceneLastFrameUrl || null;
+        const isFirstScene = currentJobData.isFirstScene !== false && sceneNumber === 1;
 
         console.log('\n' + '═'.repeat(60));
         console.log(`⚙️  [Queue Worker] Processing Scene Creation Job: ${itemId}`);
@@ -64,7 +68,7 @@ class GenerationQueue {
 
             // Get automation tool
             const tool = registry.getTool('google_fx_flow');
-            const result = await tool.execute({ itemId, prompt, type, settings, mediaUrl, imageUrl: mediaUrl, avatarName: effectiveAvatarName, proxy });
+            const result = await tool.execute({ itemId, prompt, type, settings, mediaUrl, imageUrl: mediaUrl, avatarName: effectiveAvatarName, proxy, sceneNumber, totalScenes, previousSceneLastFrameUrl, isFirstScene });
 
             const durationMs = Date.now() - startTime;
             const isVideoType = type === 'video' || type === 'avatar_video';
@@ -97,6 +101,7 @@ class GenerationQueue {
                             downloadUrl: result.downloadUrl || null,
                             filename: result.filename || null,
                             mediaUrls: result.mediaUrls || [],
+                            lastFrameUrl: result.lastFrameUrl || null,
                             text: result.text || '',
                             rawHtml: result.html || '',
                         },
@@ -110,8 +115,14 @@ class GenerationQueue {
             logger.info(`[Queue] Job ${itemId} completed successfully in ${durationMs}ms.`);
             console.log(`✅ [Queue Worker] Job ${itemId} COMPLETED in ${durationMs}ms`);
 
-            // Schedule server restart (PM2 on VPS / node --watch locally) 3s after browser closed & DB updated
-            triggerServerRestart(3000);
+            // Only trigger restart on the final scene of the project or single-scene jobs
+            const isLastScene = sceneNumber >= totalScenes;
+            if (isLastScene) {
+                // Schedule server restart (PM2 on VPS / node --watch locally) 3s after browser closed & DB updated
+                triggerServerRestart(3000);
+            } else {
+                console.log(`📌 [Queue Worker] Scene ${sceneNumber}/${totalScenes} finished. Keeping server and session active for next scene.`);
+            }
         } catch (err) {
             const durationMs = Date.now() - startTime;
             const currentRetryCount = currentJobData.retryCount || 0;
@@ -211,6 +222,10 @@ class GenerationQueue {
                     mediaUrl: job.mediaUrl || job.imageUrl || null,
                     imageUrl: job.mediaUrl || job.imageUrl || null,
                     avatarName: job.avatarName || 'me',
+                    sceneNumber: job.sceneNumber || 1,
+                    totalScenes: job.totalScenes || 1,
+                    previousSceneLastFrameUrl: job.previousSceneLastFrameUrl || null,
+                    isFirstScene: job.isFirstScene !== false && (job.sceneNumber || 1) === 1,
                     retryCount: job.retryCount || 0,
                 };
 

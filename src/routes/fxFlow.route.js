@@ -32,6 +32,10 @@ const generateAvatarSchema = Joi.object({
         proxyId: Joi.string().optional().allow(null, ''),
         countryCode: Joi.string().optional().allow(null, ''),
     }).unknown(true).optional().allow(null),
+    sceneNumber: Joi.number().integer().min(1).optional().default(1),
+    totalScenes: Joi.number().integer().min(1).optional().default(1),
+    previousSceneLastFrameUrl: Joi.string().uri().optional().allow(null, ''),
+    isFirstScene: Joi.boolean().optional().default(true),
 }).unknown(true);
 
 /**
@@ -63,6 +67,10 @@ const handleGenerateAvatarVideo = async (req, res) => {
     const avatarName = (value.avatarName && String(value.avatarName).trim()) || 'me';
     const mediaUrl = value.mediaUrl || value.imageUrl || null;
     const proxy = value.proxy || null; // Webshare proxy config { server, username, password }
+    const sceneNumber = value.sceneNumber || 1;
+    const totalScenes = value.totalScenes || 1;
+    const previousSceneLastFrameUrl = value.previousSceneLastFrameUrl || null;
+    const isFirstScene = value.isFirstScene !== false && sceneNumber === 1;
     const itemId = `gen_${uuidv4().replace(/-/g, '').substring(0, 12)}`;
 
     console.log('\n' + '📥 '.repeat(25));
@@ -92,6 +100,10 @@ const handleGenerateAvatarVideo = async (req, res) => {
             mediaUrl,
             imageUrl: mediaUrl,
             avatarName,
+            sceneNumber,
+            totalScenes,
+            previousSceneLastFrameUrl,
+            isFirstScene,
             status: 'pending',
             retryCount: 0,
             result: {
@@ -118,6 +130,10 @@ const handleGenerateAvatarVideo = async (req, res) => {
             mediaUrl,
             imageUrl: mediaUrl,
             avatarName,
+            sceneNumber,
+            totalScenes,
+            previousSceneLastFrameUrl,
+            isFirstScene,
             retryCount: 0,
             proxy, // forwarded to Playwright launchOptions
         });
@@ -190,6 +206,7 @@ router.get(['/status', '/status/:itemId'], async (req, res) => {
             avatarName: job.avatarName || 'me',
             retryCount: job.retryCount || 0,
             genratedUrl,
+            lastFrameUrl: job.result?.lastFrameUrl || null,
             settings: job.settings,
             request_id: requestId,
         };
