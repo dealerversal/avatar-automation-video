@@ -147,12 +147,8 @@ class GenerationQueue {
                     }
                 );
 
-                // 1. Teardown shared browser context cleanly so next attempt starts with a clean slate
-                try {
-                    await closeSharedContext();
-                } catch (closeErr) {
-                    console.warn(`[Queue Worker] Warning closing browser context during retry: ${closeErr.message}`);
-                }
+                // 1. Keep shared browser context & project page intact for same-session retry (no new project)
+                console.log(`♻️ [Queue Worker] Preserving browser context & project session for retry #${nextRetryCount} (same session, no new project)...`);
 
                 // 2. Wait 5 seconds for resources to settle
                 await new Promise((resolve) => setTimeout(resolve, 5000));

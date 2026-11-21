@@ -407,23 +407,36 @@ export class GoogleFxFlowTool extends BaseTool {
         let totalMs = 0;
 
         try {
-            // ── Scene 2+: Reuse shared project page if available ──────────────────
-            if (sceneNumber > 1 && sharedProjectPage && !sharedProjectPage.isClosed()) {
-                console.log(`\n♻️  [Scene ${sceneNumber}/${totalScenes}] Reusing existing project page from scene 1...`);
+            // ── Scene 2+ OR Retry: Reuse shared project page if available ──────────────────
+            const canReuseProjectPage = sharedProjectPage && !sharedProjectPage.isClosed() && sharedProjectPage.url().includes('/project/');
+
+            if (canReuseProjectPage) {
+                console.log(`\n♻️  [SAME SESSION] Reusing existing open project editor (${sharedProjectPage.url()}) — NO new project created!`);
                 page = sharedProjectPage;
 
                 // Ensure session drawer is open
                 await this._clickExpandButton(page);
                 await page.waitForTimeout(600);
 
-                // Step 1: Upload and attach the LAST FRAME of the previous scene [STEP 1/2]
-                const frameToAttach = previousSceneLastFrameUrl || lastExtractedFramePath || lastExtractedFrameUrl || effectiveMediaUrl;
-                console.log(`\n🖼️ [Scene ${sceneNumber}] [STEP 1/2] Attaching last frame of previous scene to prompt bar: ${frameToAttach}...`);
-                if (frameToAttach) {
-                    await this._uploadMediaFromUrl(page, frameToAttach, itemId);
-                    console.log(`      ✅ [Scene ${sceneNumber}] Attached previous scene last frame to prompt bar!`);
-                } else {
-                    console.warn(`      ⚠️ No last frame found for scene ${sceneNumber}!`);
+                if (sceneNumber > 1) {
+                    // Step 1: Upload and attach the LAST FRAME of the previous scene [STEP 1/2]
+                    const frameToAttach = previousSceneLastFrameUrl || lastExtractedFramePath || lastExtractedFrameUrl || effectiveMediaUrl;
+                    console.log(`\n🖼️ [Scene ${sceneNumber}] [STEP 1/2] Attaching last frame of previous scene to prompt bar: ${frameToAttach}...`);
+                    if (frameToAttach) {
+                        await this._uploadMediaFromUrl(page, frameToAttach, itemId);
+                        console.log(`      ✅ [Scene ${sceneNumber}] Attached previous scene last frame to prompt bar!`);
+                    } else {
+                        console.warn(`      ⚠️ No last frame found for scene ${sceneNumber}!`);
+                    }
+                } else if (effectiveMediaUrl) {
+                    // Scene 1 retry: ensure reference media is in prompt bar
+                    const hasChip = await page.evaluate(() => {
+                        return Array.from(document.querySelectorAll('button.chip-container, button[class*="chip-container"]')).some(el => el.offsetWidth > 0);
+                    });
+                    if (!hasChip) {
+                        console.log(`\n🖼️ [Scene 1 Retry] Attaching reference storyboard image to prompt bar: ${effectiveMediaUrl}...`);
+                        await this._uploadMediaFromUrl(page, effectiveMediaUrl, itemId);
+                    }
                 }
 
                 // Step 2: Add account Avatar to prompt [STEP 2/2] (MANDATORY & REQUIRED)
@@ -441,7 +454,7 @@ export class GoogleFxFlowTool extends BaseTool {
                     const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
                     return Array.from(document.querySelectorAll('button.chip-container, button[class*="chip-container"]')).filter(isVisible).length;
                 });
-                console.log(`      🔎 [Scene ${sceneNumber}] Prompt bar chips count: ${chipsCount} (Expected: Frame + Avatar)`);
+                console.log(`      🔎 [Scene ${sceneNumber}] Prompt bar chips count: ${chipsCount}`);
 
                 // Step 4: Submit Scene prompt
                 const defaultNextScenePrompt = `Generate the Scene ${sceneNumber} video now, using the storyboard image and the final frame of the previous scene as the continuation reference. Refer to the reference image included in the images.`;
@@ -455,7 +468,7 @@ export class GoogleFxFlowTool extends BaseTool {
                 const allExcludedUrls = Array.from(new Set([...(postSubmitUrls || [])]));
                 result = await this._extractResult(page, type, itemId, allExcludedUrls);
 
-                if (sceneNumber >= totalScenes) {
+                if (sceneNumber >= totalScenes && result && result.videoUrl) {
                     sharedProjectPage = null;
                 }
             } else {
@@ -498,21 +511,30 @@ export class GoogleFxFlowTool extends BaseTool {
             for (let projectAttempt = 1; projectAttempt <= MAX_PROJECT_ATTEMPTS; projectAttempt++) {
                 try {
                     if (projectAttempt > 1) {
-                        console.log(`\n🔄 [GoogleFX] [PROJECT RETRY ${projectAttempt}/${MAX_PROJECT_ATTEMPTS}] Starting fresh attempt in a BRAND NEW project...`);
-                        try {
-                            if (page && !page.isClosed()) await page.close();
-                        } catch (closeErr) {}
-                        page = await context.newPage();
-                        await page.goto(GOOGLE_FX_URL, { waitUntil: 'commit', timeout: config.browser.timeoutMs });
-                        await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {});
-                        await page.waitForTimeout(2500);
-                        await this._dismissOverlays(page);
+                        console.log(`\n🔄 [GoogleFX] [RETRY ATTEMPT ${projectAttempt}/${MAX_PROJECT_ATTEMPTS}] Retrying in SAME session / project editor...`);
+                        if (page && !page.isClosed() && page.url().includes('/project/')) {
+                            console.log(`      ♻️  Reusing active project URL: ${page.url()} (no new project)`);
+                            sharedProjectPage = page;
+                            await this._dismissOverlays(page);
+                        } else {
+                            if (page && !page.isClosed()) await page.close().catch(() => {});
+                            page = await context.newPage();
+                            await page.goto(GOOGLE_FX_URL, { waitUntil: 'commit', timeout: config.browser.timeoutMs });
+                            await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {});
+                            await page.waitForTimeout(2500);
+                            await this._dismissOverlays(page);
+                            await this._createNewProject(page, false);
+                            sharedProjectPage = page;
+                        }
+                    } else {
+                        if (!page.url().includes('/project/')) {
+                            console.log(`\n[3/6] ➕ Entering project editor...`);
+                            await this._createNewProject(page, false);
+                        }
+                        sharedProjectPage = page;
                     }
-
-                    console.log(`\n[3/6] ➕ Creating a new project (attempt ${projectAttempt}/${MAX_PROJECT_ATTEMPTS})...`);
-                    await this._createNewProject(page, projectAttempt > 1);
                     let projectUrl = page.url();
-                    console.log(`      ✅ New project opened: ${projectUrl}`);
+                    console.log(`      ✅ Project active: ${projectUrl}`);
 
                     // Auto-handle OAuth consent screen / account chooser if redirected to accounts.google.com
                     if (projectUrl.includes('accounts.google.com') || projectUrl.includes('signin') || projectUrl.includes('oauth')) {
@@ -672,25 +694,10 @@ export class GoogleFxFlowTool extends BaseTool {
 
                     break; // SUCCESS! Break out of project attempt loop
                 } catch (projErr) {
-                    if (projErr.message && projErr.message.includes('STUCK_AT_95_NEW_PROJECT_REQUIRED')) {
-                        if (projectAttempt < MAX_PROJECT_ATTEMPTS) {
-                            console.warn(`\n⚠️ [GoogleFX] Generation was STUCK for 10 checks in current project. Abandoning project and starting a BRAND NEW PROJECT from scratch (attempt ${projectAttempt + 1}/${MAX_PROJECT_ATTEMPTS})...\n`);
-                            if (itemId) {
-                                try {
-                                    const jobsCol = getJobsCollection();
-                                    await jobsCol.updateOne(
-                                        { itemId },
-                                        {
-                                            $set: {
-                                                progressStatus: `Generation stalled at 95%. Abandoning project & creating fresh project attempt ${projectAttempt + 1}/${MAX_PROJECT_ATTEMPTS}...`,
-                                                updatedAt: new Date(),
-                                            }
-                                        }
-                                    );
-                                } catch (e) {}
-                            }
-                            continue;
-                        }
+                    console.warn(`\n⚠️ [GoogleFX] Generation error in current project: ${projErr.message}`);
+                    if (page && !page.isClosed() && page.url().includes('/project/')) {
+                        sharedProjectPage = page;
+                        console.log(`      ♻️  Preserving project URL (${page.url()}) — staying in SAME project!`);
                     }
                     throw projErr;
                 }
@@ -762,28 +769,29 @@ export class GoogleFxFlowTool extends BaseTool {
             console.error(`[GoogleFX] ❌ Execution error: ${err.message}`);
             throw err;
         } finally {
+            const isCompletedSuccessfully = !!(result && (result.videoUrl || result.imageUrl));
             const isLastScene = sceneNumber >= totalScenes;
-            if (isLastScene) {
+
+            if (isLastScene && isCompletedSuccessfully) {
+                console.log(`🎉 [GoogleFX] Generation successfully finished for all scenes!`);
                 if (config.browser.headless) {
                     if (page && !page.isClosed()) {
                         try {
                             await page.close();
                             console.log(`      🔒 Browser tab closed cleanly.`);
-                        } catch (closeErr) {
-                            console.warn(`      ⚠️ Warning closing browser tab: ${closeErr.message}`);
-                        }
+                        } catch (closeErr) {}
                     }
                     try {
                         await closeSharedContext();
-                    } catch (closeContextErr) {
-                        console.warn(`      ⚠️ Warning closing shared browser context: ${closeContextErr.message}`);
-                    }
+                    } catch (closeContextErr) {}
                 } else {
                     console.log(`      📌 Headful mode: keeping browser open so you can view the final result.`);
                 }
                 sharedProjectPage = null;
-            } else if (sharedProjectPage) {
-                console.log(`      📌 Keeping project page open for next scene (${sceneNumber + 1}/${totalScenes})...`);
+            } else if (page && !page.isClosed() && page.url().includes('/project/')) {
+                // ALWAYS preserve sharedProjectPage for any retries or next scenes in the SAME project
+                sharedProjectPage = page;
+                console.log(`      📌 [SAME PROJECT] Preserving active project editor page (${page.url()}) for retry or next scene.`);
             } else {
                 console.log(`      📌 Multi-scene flow in progress — keeping browser open.`);
             }
@@ -791,9 +799,15 @@ export class GoogleFxFlowTool extends BaseTool {
     }
 
     async _createNewProject(page, forceNavigate = false) {
-        // If not on main lander, or inside a project URL, or forceNavigate, navigate to GOOGLE_FX_URL first to locate New Project button
-        if (forceNavigate || page.url().includes('/project/') || (!page.url().includes('flow.google.com') && !page.url().includes('labs.google/fx/tools/flow'))) {
-            console.log(`      🌍 Navigating to main flow landing page to ensure fresh "New Project" button...`);
+        // If already inside an active project editor and not explicitly forced, do NOT create a new project!
+        if (!forceNavigate && page.url().includes('/project/')) {
+            console.log(`      ℹ️ Already inside project editor (${page.url()}) — staying in same session/project.`);
+            return;
+        }
+
+        // If not on main lander, or forceNavigate, navigate to GOOGLE_FX_URL first to locate New Project button
+        if (forceNavigate || (!page.url().includes('flow.google.com') && !page.url().includes('labs.google/fx/tools/flow'))) {
+            console.log(`      🌍 Navigating to main flow landing page to open New Project...`);
             await page.goto(GOOGLE_FX_URL, { waitUntil: 'commit', timeout: config.browser.timeoutMs });
             await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {});
             await page.waitForTimeout(2500);
@@ -2732,17 +2746,16 @@ export class GoogleFxFlowTool extends BaseTool {
             }
 
             // ── GOOGLE ERROR CHECK: "Something went wrong" / "The agent failed" / "Rendering failure" ──
-            // Only trigger on VISIBLE "Try again" button — NOT on chat text containing those words
-            if ((liveState.isGoogleError || liveState.isRenderingFailure) && liveState.hasTryAgainBtn) {
+            if (liveState.isGoogleError || liveState.isRenderingFailure) {
                 const errLabel = liveState.isRenderingFailure ? '"Rendering failure"' : '"Agent failed / Something went wrong"';
-                console.warn(`      ⚠️ ${errLabel} detected in Google Flow UI — immediate retry triggered!`);
+                console.warn(`      ⚠️ ${errLabel} detected in Google Flow UI — immediate retry in SAME project!`);
                 retryCount = (retryCount || 0) + 1;
-                if (retryCount > 3) {
-                    throw new Error(`[GoogleFX] ❌ ${errLabel} error repeated 3 times — aborting.`);
+                if (retryCount > 4) {
+                    throw new Error(`[GoogleFX] ❌ ${errLabel} error repeated 4 times in same project — aborting.`);
                 }
-                console.log(`      🔄 Google error retry ${retryCount}/3 — restoring state and re-submitting...`);
+                console.log(`      🔄 Google error retry ${retryCount}/4 — restoring state and re-submitting in SAME project...`);
 
-                // Auto-click the "Try again" button to reset the error state
+                // Auto-click the "Try again" button to reset the error state if present
                 const clicked = await page.evaluate(() => {
                     const btn = Array.from(document.querySelectorAll('button')).find(b =>
                         b.offsetWidth > 0 && (b.innerText || b.textContent || '').trim().toLowerCase() === 'try again'
@@ -2753,16 +2766,17 @@ export class GoogleFxFlowTool extends BaseTool {
                     }
                     return false;
                 });
-                console.log(`      🖱️ Clicked "Try again" button.`);
+
+                if (clicked) {
+                    console.log(`      🖱️ Clicked "Try again" button.`);
+                } else {
+                    console.log(`      🔄 "Try again" button not found — re-submitting prompt in same project...`);
+                    await this._resubmitPromptForRetry(page);
+                }
                 await page.waitForTimeout(4000);
 
                 stuckProgressCount = 0;
                 lastProgressPct = -1;
-
-                // ONLY resubmit if Try again button wasn't clicked
-                if (!clicked) {
-                    await this._resubmitPromptForRetry(page);
-                }
                 lastActivityTime = Date.now();
                 continue;
             }
@@ -2842,11 +2856,19 @@ export class GoogleFxFlowTool extends BaseTool {
                 }
             }
 
-            // ── STUCK AT 95% PROGRESS CHECK: if stuck count >= 10, abandon hung project & create a NEW project from scratch ──
+            // ── STUCK PROGRESS CHECK: Retry prompt in SAME project (NO new project) ──
             if (stuckProgressCount >= 10) {
-                console.warn(`      ⚠️ Generation progress stuck at ${effectivePct || 95}% ${liveState.statusText ? `(${liveState.statusText})` : ''} for 10 checks (~50s) — project canvas is stalled.`);
-                console.warn(`      🚀 ABANDONING current project to create a BRAND NEW project and redo everything from scratch...`);
-                throw new Error(`[GoogleFX] STUCK_AT_95_NEW_PROJECT_REQUIRED: Generation progress stuck at ${effectivePct || 95}% for 10 checks (~50s). Abandoning hung project.`);
+                console.warn(`      ⚠️ Generation progress stuck at ${effectivePct || 95}% ${liveState.statusText ? `(${liveState.statusText})` : ''} for 10 checks (~50s) — retrying in SAME project!`);
+                retryCount = (retryCount || 0) + 1;
+                if (retryCount > 4) {
+                    throw new Error(`[GoogleFX] ❌ Generation stuck repeatedly after ${retryCount} retries in same project.`);
+                }
+                console.log(`      🔄 Retrying stuck generation (attempt ${retryCount}/4) — resubmitting prompt in SAME project...`);
+                stuckProgressCount = 0;
+                lastProgressPct = -1;
+                await this._resubmitPromptForRetry(page);
+                lastActivityTime = Date.now();
+                continue;
             }
 
             // CRITICAL GATE: COMPLETED when a new generated asset appears
