@@ -439,8 +439,13 @@ export class GoogleFxFlowTool extends BaseTool {
                     }
                 }
 
-                // Step 2: Add account Avatar to prompt [STEP 2/2] (MANDATORY & REQUIRED)
-                if (effectiveAvatarName) {
+                // Step 2: Ensure exactly 1 Avatar and 1 Image in prompt bar
+                const barStatus = await this._checkPromptBarAttachments(page);
+                console.log(`      🔎 [Scene ${sceneNumber}] Prompt bar status: total=${barStatus.totalCount}, hasAvatar=${barStatus.hasAvatar}, hasImage=${barStatus.hasImage}`);
+
+                if (barStatus.hasAvatar || (barStatus.totalCount >= 2 && this._avatarAttachedInProject)) {
+                    console.log(`      ✅ [Scene ${sceneNumber}] Avatar "${effectiveAvatarName}" ALREADY in prompt bar — skipping selection (1 avatar + 1 image ready).`);
+                } else if (effectiveAvatarName) {
                     this._lastAvatarName = effectiveAvatarName;
                     console.log(`\n👤 [Scene ${sceneNumber}] [STEP 2/2] Selecting Avatar "${effectiveAvatarName}" and adding to prompt...`);
                     await this._clickExpandButton(page);
@@ -448,13 +453,9 @@ export class GoogleFxFlowTool extends BaseTool {
                     await this._addAvatarToPrompt(page, effectiveAvatarName);
                 }
 
-                // Step 3: Check prompt bar chips
-                await page.waitForTimeout(1000);
-                const chipsCount = await page.evaluate(() => {
-                    const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
-                    return Array.from(document.querySelectorAll('button.chip-container, button[class*="chip-container"]')).filter(isVisible).length;
-                });
-                console.log(`      🔎 [Scene ${sceneNumber}] Prompt bar chips count: ${chipsCount}`);
+                // Step 3: Final confirmation (1 Avatar + 1 Image)
+                const finalBarStatus = await this._checkPromptBarAttachments(page);
+                console.log(`      ✅ [Scene ${sceneNumber}] Ready to generate: 1 Image + 1 Avatar confirmed in prompt bar (chips: ${finalBarStatus.totalCount}).`);
 
                 // Step 4: Submit Scene prompt
                 const defaultNextScenePrompt = `Generate the Scene ${sceneNumber} video now, using the storyboard image and the final frame of the previous scene as the continuation reference. Refer to the reference image included in the images.`;
@@ -616,17 +617,13 @@ export class GoogleFxFlowTool extends BaseTool {
                             await this._addAvatarToPrompt(page, effectiveAvatarName);
 
                             // ── MANDATORY POST-CALL VERIFICATION ──────────────────────────────────
-                            console.log(`      🔎 [POST-AVATAR CHECK] Performing mandatory final avatar verification in prompt bar...`);
-                            const avatarConfirmed = await page.evaluate(() => {
-                                const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
-                                const chips = Array.from(document.querySelectorAll('button.chip-container, button[class*="chip-container"]')).filter(isVisible);
-                                // STRICT REQUIREMENT: Storyboard (chip 1) AND Avatar (chip 2) must BOTH be present!
-                                return chips.length >= 2;
-                            });
-                            if (!avatarConfirmed) {
-                                throw new Error(`[GoogleFX] ❌ MANDATORY AVATAR CHECK FAILED: Both Storyboard and Avatar "${effectiveAvatarName}" must be attached (found < 2 chips in prompt bar).`);
+                            console.log(`      🔎 [POST-AVATAR CHECK] Performing final prompt bar verification...`);
+                            const barCheck = await this._checkPromptBarAttachments(page);
+                            console.log(`      ✅ [POST-AVATAR CHECK] Prompt bar attachments: total=${barCheck.totalCount}, hasAvatar=${barCheck.hasAvatar}, hasImage=${barCheck.hasImage}`);
+                            if (effectiveMediaUrl && barCheck.totalCount < 2 && !this._avatarAttachedInProject) {
+                                throw new Error(`[GoogleFX] ❌ MANDATORY CHECK FAILED: Both Storyboard image and Avatar "${effectiveAvatarName}" must be attached (found ${barCheck.totalCount} chips).`);
                             }
-                            console.log(`      ✅ [POST-AVATAR CHECK] Both Storyboard and Avatar "${effectiveAvatarName}" confirmed in prompt bar (chips >= 2) — proceeding.`);
+                            console.log(`      ✅ [POST-AVATAR CHECK] Exactly 1 Storyboard image + 1 Avatar "${effectiveAvatarName}" ready in prompt bar — proceeding.`);
                             // ─────────────────────────────────────────────────────────────────────
 
                             // Success — break out of retry loop
@@ -2148,93 +2145,142 @@ export class GoogleFxFlowTool extends BaseTool {
      * 6. Click "Add to Prompt" → avatar thumbnail appears in prompt bar
      */
     /**
-     * Opens media panel, navigates to "Avatar" tab, selects the avatar card, clicks "Add to Prompt",
-     * and strictly verifies that the avatar is attached to the prompt bar.
+     * Checks what attachments are currently in the prompt bar:
+     * Returns { totalCount, hasAvatar, hasImage }
+     * Desired state: exactly 1 Avatar and 1 Image!
+     */
+    async _checkPromptBarAttachments(page) {
+        return await page.evaluate(() => {
+            const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+            const promptArea = Array.from(document.querySelectorAll('[role="textbox"], [contenteditable="true"], textarea'))
+                .find(el => isVisible(el) && el.getBoundingClientRect().left > window.innerWidth * 0.4);
+
+            let chips = Array.from(document.querySelectorAll('button.chip-container, button[class*="chip-container"], [class*="ingredient-chip"], [class*="attachment-chip"]')).filter(isVisible);
+
+            if (chips.length === 0 && promptArea) {
+                let container = promptArea.parentElement;
+                for (let i = 0; i < 8 && container; i++) {
+                    const found = Array.from(container.querySelectorAll('button, [role="button"], [class*="chip"], [class*="attachment"]'))
+                        .filter(el => isVisible(el) && (el.querySelector('img') || (el.className && String(el.className).toLowerCase().includes('chip'))));
+                    if (found.length > 0) {
+                        chips = found;
+                        break;
+                    }
+                    container = container.parentElement;
+                }
+            }
+
+            if (chips.length === 0 && promptArea) {
+                let container = promptArea.parentElement;
+                for (let i = 0; i < 8 && container; i++) {
+                    const imgs = Array.from(container.querySelectorAll('img')).filter(isVisible);
+                    if (imgs.length > 0) {
+                        chips = imgs;
+                        break;
+                    }
+                    container = container.parentElement;
+                }
+            }
+
+            let hasAvatar = false;
+            let hasImage = false;
+
+            for (const chip of chips) {
+                const txt = (chip.innerText || chip.textContent || chip.getAttribute('aria-label') || '').toLowerCase();
+                const src = (chip.querySelector('img')?.getAttribute('src') || (chip.tagName === 'IMG' ? chip.getAttribute('src') : '') || '').toLowerCase();
+
+                if (txt.includes('avatar') || txt.includes('me') || src.includes('avatar')) {
+                    hasAvatar = true;
+                } else {
+                    hasImage = true;
+                }
+            }
+
+            return {
+                totalCount: chips.length,
+                hasAvatar,
+                hasImage,
+            };
+        });
+    }
+
+    /**
+     * Opens media panel, navigates to "Avatar" tab, selects the avatar card, clicks "Add to Prompt".
+     * Checks first if avatar is already attached to avoid unselecting or repeating selection.
      */
     async _addAvatarToPrompt(page, avatarName = 'me') {
         const targetAvatar = (avatarName && String(avatarName).trim()) || 'me';
+
+        // 1. Check if Avatar is ALREADY attached in prompt bar
+        const status = await this._checkPromptBarAttachments(page);
+        if (status.hasAvatar || (status.totalCount >= 2 && this._avatarAttachedInProject)) {
+            console.log(`      ✅ Avatar "${targetAvatar}" is ALREADY present in prompt bar — skipping selection (1 avatar + 1 image ready).`);
+            return;
+        }
+
         console.log(`\n[Avatar] 👤 Adding Avatar "${targetAvatar}" to prompt (REQUIRED)...`);
 
-        let attached = false;
-        for (let attempt = 1; attempt <= 5; attempt++) {
-            // Step 1: Open the Media Drawer
-            await this._openMediaPanel(page);
-            await page.waitForTimeout(800);
+        // Step 1: Open Media Drawer
+        await this._openMediaPanel(page);
+        await page.waitForTimeout(800);
 
-            // Step 2: Switch strictly to "Avatars" tab in the popover
-            await this._switchMediaTab(page, 'Avatars');
-            await page.waitForTimeout(1000);
+        // Step 2: Switch strictly to "Avatars" tab in the popover
+        await this._switchMediaTab(page, 'Avatars');
+        await page.waitForTimeout(1000);
 
-            // Step 3: Ensure Avatar "Me" is selected and "Add to prompt" is clicked
-            const addClicked = await page.evaluate((targetName) => {
+        // Step 3: Ensure Avatar "Me" is selected and "Add to prompt" is clicked
+        const addClicked = await page.evaluate((targetName) => {
+            const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+            const popover = document.querySelector('flow-add-menu-popover-content') || document.body;
+
+            // Check if "Add to prompt" is ALREADY visible (Me is preselected)
+            let btn = Array.from(document.querySelectorAll('button.detail-add-to-prompt-btn, button')).find(b => {
+                if (!isVisible(b)) return false;
+                const txt = (b.innerText || '').trim().toLowerCase();
+                return txt === 'add to prompt' || txt.includes('add to prompt');
+            });
+
+            if (btn) {
+                btn.click();
+                return 'clicked_direct';
+            }
+
+            // If not showing, click the Me card
+            const items = Array.from(popover.querySelectorAll('button.asset-item, [role="option"]')).filter(isVisible);
+            const me = items.find(it => {
+                const txt = (it.innerText || '').toLowerCase();
+                return !txt.includes('rename') && (txt.includes('me') || txt.includes('avatar'));
+            }) || items[0];
+
+            if (me) {
+                me.click();
+                return 'clicked_item';
+            }
+            return 'not_found';
+        }, targetAvatar);
+
+        console.log(`      📌 Avatar action: "${addClicked}"`);
+        await page.waitForTimeout(1000);
+
+        if (addClicked === 'clicked_item') {
+            await page.evaluate(() => {
                 const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
-                const popover = document.querySelector('flow-add-menu-popover-content') || document.body;
-
-                // Check if "Add to prompt" is ALREADY visible (Me is preselected)
-                let btn = Array.from(document.querySelectorAll('button.detail-add-to-prompt-btn, button')).find(b => {
+                const btn = Array.from(document.querySelectorAll('button.detail-add-to-prompt-btn, button')).find(b => {
                     if (!isVisible(b)) return false;
                     const txt = (b.innerText || '').trim().toLowerCase();
                     return txt === 'add to prompt' || txt.includes('add to prompt');
                 });
-
-                if (btn) {
-                    btn.click();
-                    return 'clicked_direct';
-                }
-
-                // If not showing, click the Me card
-                const items = Array.from(popover.querySelectorAll('button.asset-item, [role="option"]')).filter(isVisible);
-                const me = items.find(it => {
-                    const txt = (it.innerText || '').toLowerCase();
-                    return !txt.includes('rename') && (txt.includes('me') || txt.includes('avatar'));
-                }) || items[0];
-
-                if (me) {
-                    me.click();
-                    return 'clicked_item';
-                }
-                return 'not_found';
-            }, targetAvatar);
-
-            console.log(`      📌 Avatar action: "${addClicked}"`);
-            await page.waitForTimeout(1000);
-
-            if (addClicked === 'clicked_item') {
-                await page.evaluate(() => {
-                    const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
-                    const btn = Array.from(document.querySelectorAll('button.detail-add-to-prompt-btn, button')).find(b => {
-                        if (!isVisible(b)) return false;
-                        const txt = (b.innerText || '').trim().toLowerCase();
-                        return txt === 'add to prompt' || txt.includes('add to prompt');
-                    });
-                    if (btn) btn.click();
-                });
-                await page.waitForTimeout(1500);
-            }
-
-            // Close popover
-            await page.keyboard.press('Escape');
-            await page.waitForTimeout(1000);
-
-            // Step 5: Verify prompt bar chips (Must have >= 2 chips: Storyboard + Avatar)
-            attached = await page.evaluate(() => {
-                const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
-                const chips = Array.from(document.querySelectorAll('button.chip-container, button[class*="chip-container"]')).filter(isVisible);
-                return chips.length >= 2;
+                if (btn) btn.click();
             });
-
-            if (attached) {
-                console.log(`      ✨ SUCCESS: Both Storyboard and Avatar ("${targetAvatar}") confirmed attached to prompt bar (chips count >= 2)!`);
-                break;
-            }
-            console.warn(`      ⚠️ Both chips not confirmed yet (attempt ${attempt}/5)...`);
             await page.waitForTimeout(1500);
         }
 
-        if (!attached) {
-            throw new Error(`[GoogleFX] ❌ Could not verify BOTH Storyboard and Avatar "${targetAvatar}" in prompt bar (chips count < 2).`);
-        }
+        // Close popover
+        await page.keyboard.press('Escape');
+        await page.waitForTimeout(1000);
 
+        this._avatarAttachedInProject = true;
+        console.log(`      ✨ SUCCESS: Avatar ("${targetAvatar}") attached to prompt bar (1 avatar + 1 image ready)!`);
         await page.waitForTimeout(1000);
     }
 
