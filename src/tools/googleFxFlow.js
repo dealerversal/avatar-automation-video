@@ -436,15 +436,15 @@ export class GoogleFxFlowTool extends BaseTool {
                     }
                 }
 
-                // Step 2: Ensure exactly 1 Avatar and 1 Image in prompt bar
+                // Step 2: Ensure Avatar ("me") is explicitly attached to prompt bar alongside reference image [STEP 2/2]
                 const barStatus = await this._checkPromptBarAttachments(page);
                 console.log(`      🔎 [Scene ${sceneNumber}] Prompt bar status: total=${barStatus.totalCount}, hasAvatar=${barStatus.hasAvatar}, hasImage=${barStatus.hasImage}`);
 
-                if (barStatus.hasAvatar || (barStatus.totalCount >= 2 && this._avatarAttachedInProject)) {
-                    console.log(`      ✅ [Scene ${sceneNumber}] Avatar "${effectiveAvatarName}" ALREADY in prompt bar — skipping selection (1 avatar + 1 image ready).`);
+                if (barStatus.hasAvatar) {
+                    console.log(`      ✅ [Scene ${sceneNumber}] Avatar "${effectiveAvatarName}" ALREADY in prompt bar.`);
                 } else if (effectiveAvatarName) {
                     this._lastAvatarName = effectiveAvatarName;
-                    console.log(`\n👤 [Scene ${sceneNumber}] [STEP 2/2] Selecting Avatar "${effectiveAvatarName}" and adding to prompt...`);
+                    console.log(`\n👤 [Scene ${sceneNumber}] [STEP 2/2] Adding Avatar "${effectiveAvatarName}" to prompt bar...`);
                     await this._clickExpandButton(page);
                     await page.waitForTimeout(500);
                     await this._addAvatarToPrompt(page, effectiveAvatarName);
@@ -2219,8 +2219,8 @@ export class GoogleFxFlowTool extends BaseTool {
 
         // 1. Check if Avatar is ALREADY attached in prompt bar
         const status = await this._checkPromptBarAttachments(page);
-        if (status.hasAvatar || (status.totalCount >= 2 && this._avatarAttachedInProject)) {
-            console.log(`      ✅ Avatar "${targetAvatar}" is ALREADY present in prompt bar — skipping selection (1 avatar + 1 image ready).`);
+        if (status.hasAvatar) {
+            console.log(`      ✅ Avatar "${targetAvatar}" is ALREADY present in prompt bar — skipping selection.`);
             return;
         }
 
