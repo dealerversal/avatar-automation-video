@@ -1460,6 +1460,43 @@ export class GoogleFxFlowTool extends BaseTool {
                 console.warn(`      ⚠️ Could not verify "Never" selection after 5 attempts — Flow may pause and ask for confirmation!`);
             }
 
+            // ── STEP 4: Select Video Duration (6s, 8s, 10s) if available in Settings ─────────
+            if (type === 'video' || type === 'avatar_video') {
+                let parsedDur = settings?.duration || settings?.targetDuration || settings?.dur;
+                if (!parsedDur && promptText) {
+                    const durMatch = promptText.match(/(?:Target Scene Duration|Duration|SCENE\s+\d+)\s*(?:\(|\:)?\s*(\d+)\s*(?:SECONDS|s)/i);
+                    if (durMatch && durMatch[1]) parsedDur = parseInt(durMatch[1], 10);
+                }
+                const rawDur = parseInt(parsedDur, 10) || 8;
+                let targetDurText = '8s';
+                if (rawDur <= 6) targetDurText = '6s';
+                else if (rawDur <= 8) targetDurText = '8s';
+                else targetDurText = '10s';
+
+                try {
+                    const durCoords = await page.evaluate(({ targetDurText, rawDur }) => {
+                        const isVisible = el => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+                        const allPills = Array.from(document.querySelectorAll('button, mat-button-toggle, [role="button"]')).filter(isVisible);
+                        const durPill = allPills.find(p => {
+                            const txt = (p.innerText || p.textContent || '').trim().toLowerCase();
+                            return txt === targetDurText.toLowerCase() || txt === `${rawDur}s` || txt === `${rawDur} sec` || txt === `${rawDur}`;
+                        });
+                        if (durPill) {
+                            const r = durPill.getBoundingClientRect();
+                            return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2) };
+                        }
+                        return null;
+                    }, { targetDurText, rawDur });
+
+                    if (durCoords && durCoords.cx > 0 && durCoords.cy > 0) {
+                        console.log(`      ⏱️ Clicking Duration pill "${targetDurText}" at [${durCoords.cx}, ${durCoords.cy}]...`);
+                        await page.mouse.click(durCoords.cx, durCoords.cy);
+                        await page.waitForTimeout(600);
+                    }
+                } catch (durErr) {
+                    // Non-blocking: duration is also specified in prompt
+                }
+            }
 
             // ── STEP 5: Save / Close Settings Drawer ───────────────────────────
             let saveConfirmed = false;
