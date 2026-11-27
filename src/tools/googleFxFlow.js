@@ -1460,7 +1460,7 @@ export class GoogleFxFlowTool extends BaseTool {
                 console.warn(`      ⚠️ Could not verify "Never" selection after 5 attempts — Flow may pause and ask for confirmation!`);
             }
 
-            // ── STEP 4: Select Video Duration (6s, 8s, 10s) if available in Settings ─────────
+            // ── STEP 4: Select Video Duration (4s, 6s, 8s, 10s) if available in Settings ─────────
             if (type === 'video' || type === 'avatar_video') {
                 let parsedDur = settings?.duration || settings?.targetDuration || settings?.dur;
                 if (!parsedDur && promptText) {
@@ -1469,7 +1469,8 @@ export class GoogleFxFlowTool extends BaseTool {
                 }
                 const rawDur = parseInt(parsedDur, 10) || 8;
                 let targetDurText = '8s';
-                if (rawDur <= 6) targetDurText = '6s';
+                if (rawDur <= 4) targetDurText = '4s';
+                else if (rawDur <= 6) targetDurText = '6s';
                 else if (rawDur <= 8) targetDurText = '8s';
                 else targetDurText = '10s';
 
