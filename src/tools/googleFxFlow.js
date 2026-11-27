@@ -458,8 +458,9 @@ export class GoogleFxFlowTool extends BaseTool {
                 console.log(`      ✅ [Scene ${sceneNumber}] Ready to generate: 1 Image + 1 Avatar confirmed in prompt bar (chips: ${finalBarStatus.totalCount}).`);
 
                 // Step 4: Submit Scene prompt
-                const defaultNextScenePrompt = `Generate the Scene ${sceneNumber} video now, using the storyboard image and the final frame of the previous scene as the continuation reference. Refer to the reference image included in the images.`;
-                const scenePrompt = (cleanPrompt && !cleanPrompt.toLowerCase().includes('generate video scene number')) ? cleanPrompt : defaultNextScenePrompt;
+                const scenePrompt = sceneNumber > 1
+                    ? `Generate the Scene ${sceneNumber} video now, using the storyboard image and the final frame of the previous scene as the continuation reference.`
+                    : cleanPrompt;
                 this._lastPrompt = scenePrompt;
                 console.log(`\n⌨️ [Scene ${sceneNumber}] Submitting prompt into generation bar: "${scenePrompt}"...`);
                 const postSubmitUrls = await this._submitPrompt(page, scenePrompt);
@@ -595,14 +596,19 @@ export class GoogleFxFlowTool extends BaseTool {
                                 await page.waitForTimeout(800);
                             }
 
-                            // 4. Upload reference storyboard image & add to prompt FIRST [STEP 1/2]
-                            if (effectiveMediaUrl) {
-                                this._lastMediaUrl = effectiveMediaUrl;
+                            // 4. Upload reference image & add to prompt FIRST [STEP 1/2]
+                            const mediaToUpload = (sceneNumber > 1 && (previousSceneLastFrameUrl || lastExtractedFrameUrl || lastExtractedFramePath))
+                                ? (previousSceneLastFrameUrl || lastExtractedFrameUrl || lastExtractedFramePath)
+                                : effectiveMediaUrl;
+
+                            if (mediaToUpload) {
+                                this._lastMediaUrl = mediaToUpload;
                                 if (mediaUploadedInThisProject) {
                                     console.log(`\n[4/7] ℹ️ [RULE] Reference image was already uploaded in this project (${uploadedMediaUrls.length} url(s)). Skipping re-upload on retry in same project.`);
                                 } else {
-                                    console.log(`\n[4/7] 🖼️ [STEP 1/2] Uploading reference storyboard image and adding to prompt... (attempt ${uploadAttempt}/${MAX_UPLOAD_RETRIES + 1})`);
-                                    uploadedMediaUrls = await this._uploadMediaFromUrl(page, effectiveMediaUrl, itemId);
+                                    const mediaLabel = sceneNumber > 1 ? 'previous scene last frame' : 'reference storyboard image';
+                                    console.log(`\n[4/7] 🖼️ [STEP 1/2] Uploading ${mediaLabel} and adding to prompt... (attempt ${uploadAttempt}/${MAX_UPLOAD_RETRIES + 1})`);
+                                    uploadedMediaUrls = await this._uploadMediaFromUrl(page, mediaToUpload, itemId);
                                     mediaUploadedInThisProject = true;
                                     this._mediaUploadedInCurrentProject = true;
                                     console.log(`      🔒 Uploaded media URLs captured for exclusion: ${uploadedMediaUrls.length}`);
@@ -667,9 +673,12 @@ export class GoogleFxFlowTool extends BaseTool {
                     console.log(`\n[7/7] 🔲 Ensuring session drawer is open before prompt submission...`);
                     await this._clickExpandButton(page);
                     await page.waitForTimeout(800);
-                    console.log(`      ⌨️ Submitting prompt into generation bar...`);
-                    this._lastPrompt = cleanPrompt; // store for cancellation retry in _extractResult
-                    const postSubmitUrls = await this._submitPrompt(page, cleanPrompt);
+                    const promptToSubmit = sceneNumber > 1
+                        ? `Generate the Scene ${sceneNumber} video now, using the storyboard image and the final frame of the previous scene as the continuation reference.`
+                        : cleanPrompt;
+                    console.log(`      ⌨️ Submitting prompt into generation bar: "${promptToSubmit}"...`);
+                    this._lastPrompt = promptToSubmit; // store for cancellation retry in _extractResult
+                    const postSubmitUrls = await this._submitPrompt(page, promptToSubmit);
                     console.log(`      ✅ Prompt submitted!`);
 
                     // Merge: preExisting + post-submit snapshot + explicitly captured uploaded URLs
