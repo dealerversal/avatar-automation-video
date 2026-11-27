@@ -354,9 +354,6 @@ export class GoogleFxFlowTool extends BaseTool {
 
     async execute({ itemId, prompt, type = 'avatar_video', settings = {}, mediaUrl = null, imageUrl = null, avatarName = null, proxy = null, sceneNumber = 1, totalScenes = 1, previousSceneLastFrameUrl = null, isFirstScene = true }) {
         let cleanPrompt = this._cleanPromptText(prompt);
-        if (sceneNumber === 1 && !cleanPrompt.toLowerCase().includes('scene 1') && !cleanPrompt.includes('generate video for scnee 1 only now')) {
-            cleanPrompt = `${cleanPrompt.trim()}\n\ngenerate video for scnee 1 only now`;
-        }
         const effectiveMediaUrl = mediaUrl || imageUrl || null;
         const effectiveAvatarName = (avatarName && String(avatarName).trim()) || 'me';
         const actualGenType = type === 'avatar_video' ? 'video' : type;
