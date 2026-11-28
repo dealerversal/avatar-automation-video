@@ -401,7 +401,22 @@ export class SessionManager {
             }
             mkdirSync(profileDir, { recursive: true });
 
-            execSync(`unzip -o ${tempZipPath} -d ${profileDir}`);
+            // Run unzip — tolerate exit code 1 (warnings like "extra bytes") which still
+            // means extraction succeeded. Only treat code 2+ as a real failure.
+            try {
+                execSync(`unzip -o ${tempZipPath} -d ${profileDir}`, { stdio: 'pipe' });
+            } catch (unzipErr) {
+                // unzip exit code 1 = warnings only (e.g. "extra bytes at beginning")
+                // files are still extracted successfully in that case.
+                const exitCode = unzipErr.status ?? unzipErr.code;
+                const extractedFiles = readdirSync(profileDir);
+                if (exitCode === 1 && extractedFiles.length > 0) {
+                    logger.warn(`[SessionManager] unzip completed with warnings (exit code 1) — extraction succeeded (${extractedFiles.length} items). Continuing.`);
+                } else {
+                    // Real failure — re-throw
+                    throw unzipErr;
+                }
+            }
 
             const lockFiles = ['SingletonLock', 'SingletonCookie', 'SingletonSocket', 'lockfile'];
             for (const file of lockFiles) {
