@@ -454,10 +454,8 @@ export class GoogleFxFlowTool extends BaseTool {
                 const finalBarStatus = await this._checkPromptBarAttachments(page);
                 console.log(`      ✅ [Scene ${sceneNumber}] Ready to generate: 1 Image + 1 Avatar confirmed in prompt bar (chips: ${finalBarStatus.totalCount}).`);
 
-                // Step 4: Submit Scene prompt
-                const scenePrompt = sceneNumber > 1
-                    ? `Generate the Scene ${sceneNumber} video now, using the storyboard image and the final frame of the previous scene as the continuation reference.`
-                    : cleanPrompt;
+                // Step 4: Submit Scene prompt — preserve full cleanPrompt with exact verbatim voiceover script
+                const scenePrompt = cleanPrompt;
                 this._lastPrompt = scenePrompt;
                 console.log(`\n⌨️ [Scene ${sceneNumber}] Submitting prompt into generation bar: "${scenePrompt}"...`);
                 const postSubmitUrls = await this._submitPrompt(page, scenePrompt);
@@ -665,14 +663,11 @@ export class GoogleFxFlowTool extends BaseTool {
                     });
                     console.log(`      📸 Pre-submit snapshot: ${preExistingUrls.length} existing media URLs captured (will be excluded from result)`);
 
-                    // 7. Enter Prompt & Submit
-                    // Ensure session drawer is open — it can close after media panel or settings panel interactions
+                    // 7. Enter Prompt & Submit — preserve full cleanPrompt with exact verbatim voiceover script
                     console.log(`\n[7/7] 🔲 Ensuring session drawer is open before prompt submission...`);
                     await this._clickExpandButton(page);
                     await page.waitForTimeout(800);
-                    const promptToSubmit = sceneNumber > 1
-                        ? `Generate the Scene ${sceneNumber} video now, using the storyboard image and the final frame of the previous scene as the continuation reference.`
-                        : cleanPrompt;
+                    const promptToSubmit = cleanPrompt;
                     console.log(`      ⌨️ Submitting prompt into generation bar: "${promptToSubmit}"...`);
                     this._lastPrompt = promptToSubmit; // store for cancellation retry in _extractResult
                     const postSubmitUrls = await this._submitPrompt(page, promptToSubmit);
